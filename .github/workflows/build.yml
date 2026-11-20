@@ -1,11 +1,10 @@
-# Builds and tests every push to main. A pushed tag like v0.1.0 also creates a GitHub release with the zip
-# and the installer.
+# Builds and tests every push and pull request. On main, when Cargo.toml's version has no release yet, it also
+# creates the GitHub release v<version> with the zip and the installer: bump the version and push to publish.
 name: Build
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -23,6 +22,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          "VERSION=$version" >> $env:GITHUB_ENV
+
       - name: Build
         run: cargo build --release --locked
 
@@ -32,7 +37,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $name = "clipikon-$env:GITHUB_REF_NAME-windows-x64" -replace '/', '-'
+          $name = "clipikon-$env:VERSION-windows-x64"
           New-Item -ItemType Directory -Path "$name/licenses" | Out-Null
           Copy-Item target/release/clipikon.exe, LICENSE, README.md $name
           Copy-Item ffmpeg-build/out/FFmpeg-LICENSE.txt "$name/licenses/"
@@ -46,10 +51,9 @@ jobs:
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          & $iscc /Q "/DAppVersion=$version" installer\clipikon.iss
+          & $iscc /Q "/DAppVersion=$env:VERSION" installer\clipikon.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          "SETUP=target/installer/Clipikon-Setup-$version.exe" >> $env:GITHUB_ENV
+          "SETUP=target/installer/Clipikon-Setup-$env:VERSION.exe" >> $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
@@ -59,8 +63,15 @@ jobs:
             ${{ env.SETUP }}
 
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME $env:ZIP $env:SETUP --title "Clipikon $env:GITHUB_REF_NAME" --generate-notes
+        run: |
+          $tag = "v$env:VERSION"
+          gh release view $tag 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            "Release $tag already exists; bump the version in Cargo.toml to publish a new one."
+            exit 0
+          }
+          gh release create $tag $env:ZIP $env:SETUP --target $env:GITHUB_SHA --title "Clipikon $tag" --generate-notes

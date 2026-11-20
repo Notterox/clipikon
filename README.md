@@ -12,6 +12,9 @@ Hotkeys and settings are in the [guide](docs/guide.md).
 Windows 10 or 11 with an NVIDIA GPU (driver 531.61 or newer). Clipikon comes as an installer or as a single
 exe that runs without one.
 
+Download the installer or the zip from [Releases](https://github.com/Notterox/clipikon/releases). Windows may
+warn that the app is unrecognized, because the exe isn't signed; choose More info, then Run anyway.
+
 ## Build
 
 You need Rust with the MSVC toolchain, and Visual Studio or its Build Tools with the C++ workload.
