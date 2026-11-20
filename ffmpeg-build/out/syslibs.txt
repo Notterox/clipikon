@@ -1,0 +1,7 @@
+SvtAv1Enc
+bcrypt
+ole32
+opus
+psapi
+shell32
+user32

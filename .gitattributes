@@ -1,0 +1,5 @@
+* text=auto
+# sh chokes on CRLF; cmd is safest with it.
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.lib binary
