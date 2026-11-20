@@ -9,8 +9,8 @@ Hotkeys and settings are in the [guide](docs/guide.md).
 
 ## Platform
 
-Windows 10 or 11 with an NVIDIA GPU (driver 531.61 or newer). Clipikon is a single exe and needs no
-installation.
+Windows 10 or 11 with an NVIDIA GPU (driver 531.61 or newer). Clipikon comes as an installer or as a single
+exe that runs without one.
 
 ## Build
 

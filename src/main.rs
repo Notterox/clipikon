@@ -12,6 +12,7 @@
 //! `ffmpeg::AS_FFMPEG_ENV`.
 
 mod audio;
+mod autostart;
 mod clipboard;
 mod daemon;
 mod displays;

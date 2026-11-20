@@ -83,6 +83,7 @@ mod menu_id {
     pub const FPS_BASE: usize = 20; // + index into FPS_CHOICES
     pub const EDIT_SETTINGS: usize = 30;
     pub const RELOAD_SETTINGS: usize = 31;
+    pub const AUTOSTART: usize = 32;
     pub const ABOUT: usize = 40;
     pub const DELAY_BASE: usize = 50; // + index into DELAY_CHOICES
     pub const EXIT: usize = 99;
@@ -124,6 +125,8 @@ pub fn run() {
         });
         add_tray_icon(hwnd);
         register_hotkey(hwnd);
+        crate::autostart::repair();
+        welcome(hwnd);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -368,6 +371,19 @@ fn set_tip(hwnd: HWND, tip: &str) {
     }
 }
 
+/// On first start, a tray notification saying how to record, since the app has no window of its own.
+fn welcome(hwnd: HWND) {
+    let (shown, hotkey) = app(|a| (a.settings.welcome_shown, a.settings.hotkey.clone()));
+    if shown {
+        return;
+    }
+    notify(hwnd, &format!("Press {hotkey} to record a region. Right-click this icon for options."));
+    app(|a| {
+        a.settings.welcome_shown = true;
+        a.settings.save();
+    });
+}
+
 fn notify(hwnd: HWND, text: &str) {
     let mut nid = tray_data(hwnd);
     nid.uFlags = NIF_INFO;
@@ -536,6 +552,7 @@ fn show_menu(hwnd: HWND) {
     append_item(menu, menu_id::EDIT_SETTINGS, "Edit settings…", false);
     append_item(menu, menu_id::RELOAD_SETTINGS, "Reload settings", false);
     append_separator(menu);
+    append_item(menu, menu_id::AUTOSTART, "Launch at startup", crate::autostart::enabled());
     append_item(menu, menu_id::ABOUT, "About Clipikon", false);
     append_item(menu, menu_id::EXIT, "Exit", false);
     let cmd = track_menu(hwnd, menu);
@@ -570,6 +587,7 @@ fn on_menu(hwnd: HWND, id: usize) {
             app(|a| a.settings = Settings::load());
             register_hotkey(hwnd);
         }
+        menu_id::AUTOSTART => crate::autostart::set(!crate::autostart::enabled()),
         menu_id::ABOUT => show_about(),
         menu_id::EXIT => match app(|a| a.state) {
             State::Recording | State::Stopping => {
