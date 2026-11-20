@@ -1,6 +1,6 @@
 # Clipikon
 
-<!-- Demo video goes here: edit this file on github.com and drag the MP4 onto this line. -->
+https://github.com/user-attachments/assets/57140a14-2d9e-4873-a5ad-8f6543032b7d
 
 Clipikon is a screen recording tool. Press Alt+Shift+R, drag over an area and record, then trim, crop
 and export the clip as MP4, WebM or GIF. Recording runs on the GPU, so it barely affects games.
@@ -22,9 +22,6 @@ You need Rust with the MSVC toolchain, and Visual Studio or its Build Tools with
 ```bat
 cargo build --release
 ```
-
-The exe is written to `target\release\clipikon.exe`. FFmpeg is linked into it from the prebuilt libraries in
-`ffmpeg-build/out`. To rebuild them, run `ffmpeg-build\build.cmd` (see the comments in `build.sh`).
 
 ## Is it built with AI?
 
