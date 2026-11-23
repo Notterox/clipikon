@@ -288,10 +288,22 @@ pub fn chip(ui: &mut Ui, accent: Color32, text: &str, selected: bool) -> Respons
 pub fn segmented(ui: &mut Ui, accent: Color32, labels: &[&str], selected: usize) -> Option<usize> {
     let (rect, area) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
     ui.painter().rect(rect, CornerRadius::same(6), CONTROL, Stroke::new(1.0, CONTROL_STROKE), egui::StrokeKind::Inside);
-    let w = rect.width() / labels.len() as f32;
+    // Equal segments, unless a label (bold when selected) doesn't fit one: then each gets room for its text.
+    let need: Vec<f32> =
+        labels.iter().map(|l| ui.painter().layout_no_wrap(l.to_string(), semibold(14.0), TEXT).size().x + 20.0).collect();
+    let equal = rect.width() / labels.len() as f32;
+    let widths: Vec<f32> = if need.iter().all(|n| *n <= equal) {
+        vec![equal; labels.len()]
+    } else {
+        let total: f32 = need.iter().sum();
+        need.iter().map(|n| n * rect.width() / total).collect()
+    };
     let mut clicked = None;
+    let mut left = rect.left();
     for (i, label) in labels.iter().enumerate() {
-        let seg = egui::Rect::from_min_size(egui::pos2(rect.left() + w * i as f32, rect.top()), vec2(w, rect.height())).shrink(3.0);
+        let w = widths[i];
+        let seg = egui::Rect::from_min_size(egui::pos2(left, rect.top()), vec2(w, rect.height())).shrink(3.0);
+        left += w;
         // Ids derived from this control's own (auto) id: several segmented controls in one Ui mustn't share them.
         let resp = ui.interact(seg, area.id.with(i), Sense::click());
         let p = ui.painter();

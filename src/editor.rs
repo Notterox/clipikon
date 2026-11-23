@@ -429,7 +429,7 @@ impl Editor {
             painter.image(t.id(), img_rect, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
         }
         let mb = gp.file.metadata().map(|m| m.len() as f64 / 1_048_576.0).unwrap_or(0.0);
-        let badge = format!("GIF preview · {}×{} · {mb:.1} MB · click to close", gp.width, gp.height);
+        let badge = format!("GIF preview: {}×{}, {mb:.1} MB. Click to close.", gp.width, gp.height);
         let galley = painter.layout_no_wrap(badge, FontId::proportional(12.0), TEXT);
         let at = rect.left_top() + vec2(12.0, 12.0);
         painter.rect_filled(Rect::from_min_size(at, galley.size() + vec2(16.0, 6.0)), 4, Color32::from_rgba_premultiplied(30, 30, 30, 235));
@@ -518,7 +518,7 @@ impl Editor {
             if let Some(gp) = self.current_gif_preview().filter(|p| p.ok()) {
                 if std::fs::copy(&gp.file, &output).is_ok() {
                     let mb = gp.size().unwrap_or(0) as f64 / 1_048_576.0;
-                    self.status = format!("Saved {} · {mb:.1} MB (from the preview)", output.file_name().unwrap_or_default().to_string_lossy());
+                    self.status = format!("Saved {} ({mb:.1} MB, from the preview)", output.file_name().unwrap_or_default().to_string_lossy());
                     self.last_export = Some(output);
                     return;
                 }
@@ -551,7 +551,7 @@ impl Editor {
             Ok(()) => {
                 let mb = std::fs::metadata(&job.output).map(|m| m.len()).unwrap_or(0) as f64 / 1_048_576.0;
                 self.status = format!(
-                    "Saved {} · {mb:.1} MB · took {:.1} s",
+                    "Saved {} ({mb:.1} MB, took {:.1} s)",
                     job.output.file_name().unwrap_or_default().to_string_lossy(),
                     job.started.elapsed().as_secs_f64()
                 );
@@ -889,7 +889,9 @@ impl Editor {
                 .response
                 .on_hover_text("Upscaling, when the view is larger than the video");
             if self.upscaler != before {
-                EditorPrefs { upscaler: self.upscaler }.save();
+                let mut prefs = EditorPrefs::load();
+                prefs.upscaler = self.upscaler;
+                prefs.save();
             }
         });
         let center = Rect::from_center_size(rect.center(), vec2(136.0, 40.0));
@@ -915,7 +917,7 @@ impl Editor {
             }
             let label = match (self.crop_px(), self.cropping.is_some()) {
                 (_, true) => "Cropping…".to_string(),
-                (Some([_, _, w, h]), _) => format!("Crop · {w}×{h}"),
+                (Some([_, _, w, h]), _) => format!("Crop: {w}×{h}"),
                 (None, _) => "Crop".to_string(),
             };
             let active = self.crop.is_some() || self.cropping.is_some();
@@ -1041,7 +1043,7 @@ impl Editor {
                     });
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new("Space play · ←/→ frame · Shift+←/→ 1 s · I/O in/out · C crop").small().color(TEXT3));
+                    ui.label(RichText::new("Space plays, ←/→ steps a frame (Shift: 1 s), I/O set in and out, C crops").small().color(TEXT3));
                 });
             });
         });
@@ -1073,12 +1075,12 @@ impl Editor {
         let size_mb = std::fs::metadata(&self.file).map(|m| m.len()).unwrap_or(0) as f64 / 1_048_576.0;
         ui.label(
             RichText::new(format!(
-                "{}×{} · {:.0} fps · {} · {size_mb:.1} MB{}",
+                "{}×{}    {:.0} fps    {}    {size_mb:.1} MB{}",
                 self.info.width,
                 self.info.height,
                 self.info.fps,
                 fmt_time(self.info.duration),
-                if self.info.has_audio { "" } else { " · no audio" }
+                if self.info.has_audio { "" } else { "    no audio" }
             ))
             .small()
             .color(TEXT2),
@@ -1136,8 +1138,8 @@ impl Editor {
             });
             fluent::setting_row(ui, "Colors", |ui| {
                 let label = |c: u32| match c {
-                    256 => "256 · best".to_string(),
-                    32 => "32 · smallest".to_string(),
+                    256 => "256 (best)".to_string(),
+                    32 => "32 (smallest)".to_string(),
                     c => c.to_string(),
                 };
                 fluent::combo("gif_colors", label(g.colors)).show_ui(ui, |ui| {
@@ -1148,9 +1150,9 @@ impl Editor {
             });
             fluent::setting_row(ui, "Dithering", |ui| {
                 let label = |d: Dither| match d {
-                    Dither::Pattern => "Pattern · stable",
-                    Dither::Smooth => "Smooth · bigger",
-                    Dither::None => "None · flat",
+                    Dither::Pattern => "Pattern (stable)",
+                    Dither::Smooth => "Smooth (bigger)",
+                    Dither::None => "None (flat)",
                 };
                 fluent::combo("gif_dither", label(g.dither)).show_ui(ui, |ui| {
                     for d in [Dither::Pattern, Dither::Smooth, Dither::None] {
@@ -1241,7 +1243,7 @@ impl Editor {
                 let mut format = self.format;
                 fluent::setting_row(ui, "Format", |ui| {
                     let label = |f: Format| match f {
-                        Format::WebM => "WebM · AV1 + Opus",
+                        Format::WebM => "WebM (AV1 + Opus)",
                         f => f.label(),
                     };
                     fluent::combo("format", label(format)).show_ui(ui, |ui| {
@@ -1257,9 +1259,9 @@ impl Editor {
                 ui.add_enabled_ui(self.mode != Mode::FastCut, |ui| {
                     fluent::setting_row(ui, "Codec", |ui| {
                         let label = |c: Codec| match c {
-                            Codec::H264 => "H.264 · plays anywhere",
-                            Codec::Hevc => "HEVC · ~40% smaller",
-                            Codec::Av1 => "AV1 · smallest, CPU",
+                            Codec::H264 => "H.264 (plays anywhere)",
+                            Codec::Hevc => "HEVC (~40% smaller)",
+                            Codec::Av1 => "AV1 (smallest, CPU)",
                         };
                         let choices = self.format.codecs();
                         ui.add_enabled_ui(choices.len() > 1, |ui| {
@@ -1361,7 +1363,7 @@ impl Editor {
         let bounds = self.source_rect();
         ui.add_space(4.0);
         ui.heading("Crop");
-        ui.label(RichText::new("Applies to the whole clip · exports re-encode").small().color(TEXT2));
+        ui.label(RichText::new("Applies to the whole clip. Exports re-encode.").small().color(TEXT2));
         ui.add_space(6.0);
 
         fluent::card(ui, |ui| {

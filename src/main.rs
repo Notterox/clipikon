@@ -4,6 +4,7 @@
 //! Modes:
 //!   clipikon                        tray daemon (hotkey, overlay, recorder)
 //!   clipikon edit <video>           trim/export window (also: drop a video onto the exe)
+//!   clipikon image <png>            screenshot editor: crop, mark up, copy, save (also: drop a PNG)
 //!   clipikon quick-menu             hold-hotkey settings flyout, driven by the daemon (see quickmenu.rs)
 //!   clipikon --record-test <secs> [x y w h]   records display 0 headlessly, for diagnostics
 //!   clipikon --ui-test              region picker + countdown/recording pills, without recording
@@ -22,6 +23,7 @@ mod fluent;
 mod ffmpeg;
 mod frame;
 mod icon_art;
+mod image_editor;
 mod layered;
 mod overlay;
 mod preview;
@@ -48,6 +50,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [cmd, file] if cmd == "edit" => open_editor(PathBuf::from(file)),
+        [cmd, file] if cmd == "image" => open_image(PathBuf::from(file)),
         [cmd] if cmd == "quick-menu" => {
             let _ = quickmenu::run();
         }
@@ -55,6 +58,7 @@ fn main() {
         [cmd] if cmd == "--ui-test" => daemon::ui_test(),
         // Passed by the installer's "Start Clipikon" checkbox on a first install.
         [cmd] if cmd == "--installed" => daemon::run(true),
+        [file] if is_png(file) => open_image(PathBuf::from(file)),
         [file] if PathBuf::from(file).is_file() => open_editor(PathBuf::from(file)),
         _ => daemon::run(false),
     }
@@ -64,6 +68,17 @@ fn open_editor(file: PathBuf) {
     if let Err(e) = editor::run(file) {
         win::message_box(&e, true);
     }
+}
+
+fn open_image(file: PathBuf) {
+    if let Err(e) = image_editor::run(file) {
+        win::message_box(&e, true);
+    }
+}
+
+fn is_png(file: &str) -> bool {
+    let p = PathBuf::from(file);
+    p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))
 }
 
 /// Local time as `YYYY-MM-DD_HH-MM-SS` for file names.

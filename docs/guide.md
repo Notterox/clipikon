@@ -40,7 +40,19 @@ With a start delay, the frame and a countdown pill appear after you select the r
 the hotkey) cancels.
 
 Screenshots are copied to the clipboard and saved as PNG in `Pictures\Screenshots\Clipikon`; click the
-notification to open one. The PNG is lossless but small: an image with few colors (most UI) is stored with a
+notification to edit one (or turn on **Edit screenshots right away** in the tray menu). The editor crops,
+draws (pen, highlighter, arrow, rectangle, text), pixelates private details and erases marks; the Select
+tool moves a mark, changes its color or size, or deletes it (Delete), and a double-click edits text. Ctrl+Z /
+Ctrl+Y undo and redo, Ctrl+C copies, Ctrl+S saves over the file, Ctrl+Shift+S saves as PNG or JPEG. A PNG
+dropped on `clipikon.exe` opens in it too.
+
+Click the selected tool again for its options (color, thickness, smoothing, fill). The round color button
+sets any color, for the drawing tool or the selected mark; with the eyedropper beside it, a click on the
+image copies that color's hex code and Shift+click draws in it. The mouse wheel zooms toward the pointer; drag with the middle button or Space held to pan; Ctrl+0
+fits the window and Ctrl+1 shows actual size. The gear button sets the size of copies and saves (10% to 400%; an upscale is
+either Sharp, smooth with crisp edges, or Pixels, each pixel a block), and the format: PNG (lossless, or 256 colors:
+usually less than half the size) or JPEG (with its quality). While it's open the image shows the result and
+its file size. Save as starts with that format; Copy is always PNG and Save keeps the file's format. The editor remembers its tools and these settings. The PNG is lossless but small: an image with few colors (most UI) is stored with a
 palette. The clipboard holds only the PNG, and makes a bitmap when an app that can't paste PNG asks for one.
 
 Settings: `%APPDATA%\Clipikon\settings.json` (hotkeys, fps where 0 = refresh rate, start delay, quality,

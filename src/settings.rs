@@ -24,6 +24,8 @@ pub struct Settings {
     pub screenshot_cursor: bool,
     /// Seconds between picking the area and taking the screenshot (then taken live, not from the frozen screen).
     pub screenshot_delay_secs: u32,
+    /// Open each screenshot in the editor right away (otherwise its notification does).
+    pub screenshot_open_editor: bool,
 }
 
 impl Default for Settings {
@@ -44,6 +46,7 @@ impl Default for Settings {
             screenshot_folder: home.join("Pictures").join("Screenshots").join("Clipikon"),
             screenshot_cursor: false,
             screenshot_delay_secs: 0,
+            screenshot_open_editor: false,
         }
     }
 }
@@ -54,6 +57,33 @@ impl Default for Settings {
 pub struct EditorPrefs {
     /// How the preview is scaled up when the view is larger than the video.
     pub upscaler: Upscaler,
+    /// How much the screenshot editor smooths pen and highlighter strokes.
+    pub smoothing: Smoothing,
+    /// The screenshot editor's tools as last left (tool, colors, sizes, fill), in its own format.
+    pub image_tools: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Smoothing {
+    Off,
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl Smoothing {
+    pub const ALL: [Smoothing; 4] = [Smoothing::Off, Smoothing::Low, Smoothing::Medium, Smoothing::High];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

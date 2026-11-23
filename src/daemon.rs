@@ -100,6 +100,7 @@ mod menu_id {
     pub const EDIT_SETTINGS: usize = 30;
     pub const RELOAD_SETTINGS: usize = 31;
     pub const AUTOSTART: usize = 32;
+    pub const SHOT_EDITOR: usize = 33;
     pub const ABOUT: usize = 40;
     pub const UPDATE: usize = 41;
     pub const DELAY_BASE: usize = 50; // + index into DELAY_CHOICES
@@ -598,6 +599,7 @@ fn show_menu(hwnd: HWND) {
     append_item(menu, menu_id::EDIT_SETTINGS, "Edit settings…", false);
     append_item(menu, menu_id::RELOAD_SETTINGS, "Reload settings", false);
     append_separator(menu);
+    append_item(menu, menu_id::SHOT_EDITOR, "Edit screenshots right away", s.screenshot_open_editor);
     append_item(menu, menu_id::AUTOSTART, "Launch at startup", crate::autostart::enabled());
     append_item(menu, menu_id::UPDATE, "Check for updates…", false);
     append_item(menu, menu_id::ABOUT, "About Clipikon", false);
@@ -638,6 +640,10 @@ fn on_menu(hwnd: HWND, id: usize) {
             register_hotkey(hwnd);
         }
         menu_id::AUTOSTART => crate::autostart::set(!crate::autostart::enabled()),
+        menu_id::SHOT_EDITOR => app(|a| {
+            a.settings.screenshot_open_editor = !a.settings.screenshot_open_editor;
+            a.settings.save();
+        }),
         menu_id::ABOUT => show_about(),
         menu_id::UPDATE => check_for_updates(hwnd),
         menu_id::EXIT => match app(|a| a.state) {
@@ -735,6 +741,13 @@ fn apply_update(ready: &crate::update::Ready) {
             message_box(&format!("Couldn't start the update.
 {e}"), true);
         }
+    }
+}
+
+/// The screenshot editor, in its own process.
+pub fn open_image_editor(file: &std::path::Path) {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = Command::new(exe).arg("image").arg(file).spawn();
     }
 }
 
@@ -970,10 +983,15 @@ fn on_shot_saved(hwnd: HWND, (png, file): (Result<Vec<u8>, String>, Result<PathB
     if copied.is_ok() {
         app(|a| a.clip_png = Some(png));
     }
+    if let Ok(f) = &file
+        && app(|a| a.settings.screenshot_open_editor)
+    {
+        return open_image_editor(f); // the editor is the confirmation
+    }
     let name = |f: &PathBuf| f.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let text = match (&copied, &file) {
-        (Ok(()), Ok(f)) => format!("Screenshot copied. Saved as {}; click to open it.", name(f)),
-        (Err(_), Ok(f)) => format!("Screenshot saved as {}, but the clipboard was busy; click to open it.", name(f)),
+        (Ok(()), Ok(f)) => format!("Screenshot copied and saved as {}. Click to edit it.", name(f)),
+        (Err(_), Ok(f)) => format!("Screenshot saved as {}, but the clipboard was busy. Click to edit it.", name(f)),
         (Ok(()), Err(e)) => format!("Screenshot copied. {e}"),
         (Err(c), Err(e)) => format!("Screenshot lost: the clipboard was busy ({c}). {e}"),
     };
@@ -1084,7 +1102,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
             NIN_BALLOONUSERCLICK => {
                 if let Some(file) = app(|a| a.balloon_file.take()) {
-                    let _ = Command::new("explorer.exe").arg(file).spawn();
+                    open_image_editor(&file);
                 }
             }
             _ => {}

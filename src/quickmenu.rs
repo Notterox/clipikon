@@ -145,7 +145,7 @@ impl QuickMenu {
     /// Frame-rate choices: the presets below the refresh rate, then the refresh rate itself (setting 0).
     fn fps_choices(&self) -> Vec<(u32, String)> {
         let mut v: Vec<(u32, String)> = FPS_PRESETS.iter().filter(|&&f| self.hz == 0 || f < self.hz).map(|&f| (f, f.to_string())).collect();
-        v.push((0, if self.hz > 0 { format!("{} · max", self.hz) } else { "Max".into() }));
+        v.push((0, if self.hz > 0 { format!("{} (max)", self.hz) } else { "Max".into() }));
         v
     }
 }
@@ -254,7 +254,7 @@ impl eframe::App for QuickMenu {
                 fluent::toggle(ui, accent, &mut s.draw_mouse);
             });
             ui.add_space(2.0);
-            ui.label(RichText::new("This recording only · Enter records · Esc closes").small().color(TEXT3));
+            ui.label(RichText::new("For this recording only. Enter records, Esc closes.").small().color(TEXT3));
         });
         self.reveal_when_painted(&ctx);
     }

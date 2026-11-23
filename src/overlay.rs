@@ -714,11 +714,11 @@ fn draw_layers(s: &mut Session) {
     // Hint under the toolbar while nothing is selected.
     if s.sel.is_none() {
         let text = match (s.kind, s.mode) {
-            (Kind::Video, Mode::Window) => "Click a window to select it  ·  Esc to cancel",
-            (Kind::Video, _) => "Drag to select an area  ·  Click to select the whole screen  ·  Esc to cancel",
-            (Kind::Screenshot, Mode::Region) => "Drag to capture an area  ·  Click to capture the whole screen  ·  Esc to cancel",
-            (Kind::Screenshot, Mode::Window) => "Click a window to capture it  ·  Esc to cancel",
-            (Kind::Screenshot, Mode::Display) => "Click a screen to capture it  ·  Esc to cancel",
+            (Kind::Video, Mode::Window) => "Click a window to select it. Esc cancels.",
+            (Kind::Video, _) => "Drag to select an area, or click to select the whole screen. Esc cancels.",
+            (Kind::Screenshot, Mode::Region) => "Drag to capture an area, or click to capture the whole screen. Esc cancels.",
+            (Kind::Screenshot, Mode::Window) => "Click a window to capture it. Esc cancels.",
+            (Kind::Screenshot, Mode::Display) => "Click a screen to capture it. Esc cancels.",
         };
         let Some(m) = Canvas::new(1, 1) else { return };
         let (tw, th) = m.text_size(text, px(14.0), false);
@@ -876,7 +876,7 @@ fn draw_toolbar(s: &mut Session, scale: f64, at: Option<RECT>) -> (i32, i32) {
                 }
                 Item::Mode(m) => {
                     let (g, label) = match m {
-                        Mode::Region => ("\u{E8B3}", "Region"),
+                        Mode::Region => ("\u{EF20}", "Region"), // a dashed selection
                         Mode::Window => ("\u{E737}", "Window"),
                         Mode::Display => ("\u{E7F4}", "Display"),
                     };
