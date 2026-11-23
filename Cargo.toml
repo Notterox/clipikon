@@ -1,6 +1,6 @@
 [package]
 name = "clipikon"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 description = "Screen region recorder for Windows with NVENC, plus a trim and export editor"
@@ -36,6 +36,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Memory",
     "Win32_System_Registry",
     "Win32_System_Ole",
+    "Win32_System_Com",
     "Win32_System_SystemInformation",
     "UI",
     "UI_ViewManagement",

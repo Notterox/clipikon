@@ -39,7 +39,7 @@ sharing.
 With a start delay, the frame and a countdown pill appear after you select the region; its Cancel button (or
 the hotkey) cancels.
 
-Screenshots are copied to the clipboard and saved as PNG in `Pictures\Screenshots\Clipikon`; click the
+Screenshots are copied to the clipboard and saved as PNG in `Clipikon` inside Windows' Screenshots folder (usually `Pictures\Screenshots`); click the
 notification to edit one (or turn on **Edit screenshots right away** in the tray menu). The editor crops,
 draws (pen, highlighter, arrow, rectangle, text), pixelates private details and erases marks; the Select
 tool moves a mark, changes its color or size, or deletes it (Delete), and a double-click edits text. Ctrl+Z /
@@ -56,7 +56,8 @@ its file size. Save as starts with that format; Copy is always PNG and Save keep
 palette. The clipboard holds only the PNG, and makes a bitmap when an app that can't paste PNG asks for one.
 
 Settings: `%APPDATA%\Clipikon\settings.json` (hotkeys, fps where 0 = refresh rate, start delay, quality,
-output folder, audio offset, and for screenshots: folder, cursor, delay). Recordings go to `Videos\Clipikon`.
+output folder, audio offset, and for screenshots: folder, cursor, delay). Recordings go to `Clipikon` in the Videos library's save location. Left unset (`null`), both folders
+follow Windows if you move those folders.
 
 ## Build
 

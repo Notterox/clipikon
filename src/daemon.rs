@@ -618,7 +618,7 @@ fn on_menu(hwnd: HWND, id: usize) {
             SetTimer(Some(hwnd), SHOT_TIMER, 250, None); // let the menu fade out first
         },
         menu_id::OPEN_VIDEO => {
-            let dir = app(|a| a.settings.output_folder.clone());
+            let dir = app(|a| a.settings.recordings_dir());
             let mut dlg = rfd::FileDialog::new().add_filter("Videos", &["mp4", "mkv", "mov"]);
             if dir.is_dir() {
                 dlg = dlg.set_directory(dir);
@@ -628,7 +628,7 @@ fn on_menu(hwnd: HWND, id: usize) {
             }
         }
         menu_id::OPEN_FOLDER => {
-            let dir = app(|a| a.settings.output_folder.clone());
+            let dir = app(|a| a.settings.recordings_dir());
             let _ = std::fs::create_dir_all(&dir);
             let _ = Command::new("explorer.exe").arg(dir).spawn();
         }
@@ -958,7 +958,7 @@ fn take_live(region: &CaptureRegion, cursor: bool) -> Option<crate::screenshot::
 
 /// Encodes and saves off the UI thread; `on_shot_saved` then puts it on the clipboard.
 fn save_screenshot(hwnd: HWND, image: crate::screenshot::Image) {
-    let folder = app(|a| a.settings.screenshot_folder.clone());
+    let folder = app(|a| a.settings.screenshots_dir());
     let send = SendHwnd(hwnd.0 as isize);
     std::thread::spawn(move || {
         let png = crate::screenshot::encode_png(image.width, image.height, &image.bgra, crate::screenshot::Order::Bgra);

@@ -162,8 +162,9 @@ impl Recorder {
             return Err(format!("Nothing was recorded.\n{}", self.error_text()));
         }
 
-        std::fs::create_dir_all(&self.settings.output_folder).map_err(|e| e.to_string())?;
-        let output = self.settings.output_folder.join(format!("Clipikon_{}.mp4", crate::timestamp_name()));
+        let folder = self.settings.recordings_dir();
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let output = folder.join(format!("Clipikon_{}.mp4", crate::timestamp_name()));
 
         let mut args: Vec<String> = vec!["-i".into(), self.video_path.to_string_lossy().into()];
         if let (Some(a), Some(v)) = (audio_start, video_start) {
