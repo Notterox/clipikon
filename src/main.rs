@@ -27,6 +27,7 @@ mod overlay;
 mod preview;
 mod quickmenu;
 mod recorder;
+mod screenshot;
 mod settings;
 mod update;
 mod video_view;

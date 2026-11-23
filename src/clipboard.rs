@@ -1,12 +1,13 @@
-//! Puts a file (CF_HDROP) or an image (CF_DIB + PNG) on the clipboard, so it can be pasted into chat apps,
+//! Puts a file (CF_HDROP) or an image (PNG + CF_DIB) on the clipboard, so it can be pasted into chat apps,
 //! image editors or Explorer.
 
+use crate::screenshot::Image;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardOwner, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_DIB, CF_HDROP};
@@ -65,53 +66,93 @@ pub fn copy_file(path: &Path) -> Result<(), String> {
     set(vec![(CF_HDROP.0 as u32, mem)])
 }
 
-/// Copies an RGBA image as a bitmap (what most apps paste) and as PNG (what browsers and some chat apps prefer).
+/// Copies an RGBA image (an editor frame) as a compact PNG and a 24-bit bitmap.
 pub fn copy_image(width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
-    let (w, h) = (width as usize, height as usize);
-    if rgba.len() != w * h * 4 {
+    if rgba.len() != width as usize * height as usize * 4 {
         return Err("bad image size".into());
     }
-    let mut items = Vec::new();
+    let png = crate::screenshot::encode_png(width, height, rgba, crate::screenshot::Order::Rgba)?;
+    let bgra = rgba.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+    let dib = dib(&Image { width, height, bgra })?;
+    let mut items = vec![(CF_DIB.0 as u32, dib)];
+    if let Ok(mem) = global(png.len(), |buf| buf.copy_from_slice(&png)) {
+        items.push((png_format(), mem));
+    }
+    set(items)
+}
 
-    // CF_DIB: header + bottom-up BGRA rows.
+/// Copies a PNG as is: the clipboard holds only the compressed image. The bitmap that most apps paste
+/// (CF_DIB) is promised but only made when an app asks for it, so `owner` must answer WM_RENDERFORMAT with
+/// `render_dib` and WM_RENDERALLFORMATS with `render_all`.
+pub fn copy_png(owner: HWND, png: &[u8]) -> Result<(), String> {
+    let mem = global(png.len(), |buf| buf.copy_from_slice(png))?;
+    unsafe {
+        if let Err(e) = OpenClipboard(Some(owner)) {
+            let _ = GlobalFree(Some(mem));
+            return Err(e.to_string());
+        }
+        let _ = EmptyClipboard();
+        let result = SetClipboardData(png_format(), Some(HANDLE(mem.0))).map(drop).map_err(|e| e.to_string());
+        if result.is_err() {
+            let _ = GlobalFree(Some(mem));
+        }
+        let _ = SetClipboardData(CF_DIB.0 as u32, None); // delayed rendering
+        let _ = CloseClipboard();
+        result
+    }
+}
+
+/// WM_RENDERFORMAT for CF_DIB: puts the bitmap of `png` on the clipboard, which the pasting app has open.
+pub fn render_dib(png: &[u8]) {
+    let Ok(img) = crate::screenshot::decode_png(png) else { return };
+    if let Ok(mem) = dib(&img) {
+        unsafe {
+            if SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(mem.0))).is_err() {
+                let _ = GlobalFree(Some(mem));
+            }
+        }
+    }
+}
+
+/// WM_RENDERALLFORMATS (the owner is quitting): makes the promised bitmap now, if the clipboard is still ours.
+pub fn render_all(owner: HWND, png: &[u8]) {
+    unsafe {
+        if OpenClipboard(Some(owner)).is_ok() {
+            if GetClipboardOwner().ok() == Some(owner) {
+                render_dib(png);
+            }
+            let _ = CloseClipboard();
+        }
+    }
+}
+
+fn png_format() -> u32 {
+    unsafe { RegisterClipboardFormatW(w!("PNG")) }
+}
+
+/// CF_DIB memory: a header and bottom-up 24-bit rows, each padded to 4 bytes (a quarter smaller than 32-bit).
+fn dib(img: &Image) -> Result<HGLOBAL, String> {
+    let (w, h) = (img.width as usize, img.height as usize);
+    let stride = (w * 3).div_ceil(4) * 4;
     let header = size_of::<BITMAPINFOHEADER>();
-    let dib = global(header + w * h * 4, |buf| {
+    global(header + stride * h, |buf| {
         let bih = BITMAPINFOHEADER {
             biSize: header as u32,
-            biWidth: width as i32,
-            biHeight: height as i32,
+            biWidth: w as i32,
+            biHeight: h as i32,
             biPlanes: 1,
-            biBitCount: 32,
+            biBitCount: 24,
             biCompression: BI_RGB.0,
-            biSizeImage: (w * h * 4) as u32,
+            biSizeImage: (stride * h) as u32,
             ..Default::default()
         };
         unsafe { std::ptr::write_unaligned(buf.as_mut_ptr() as *mut BITMAPINFOHEADER, bih) };
         for y in 0..h {
-            let src = &rgba[(h - 1 - y) * w * 4..(h - y) * w * 4];
-            let dst = &mut buf[header + y * w * 4..header + (y + 1) * w * 4];
-            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                d.copy_from_slice(&[s[2], s[1], s[0], 255]);
+            let src = &img.bgra[(h - 1 - y) * w * 4..(h - y) * w * 4];
+            let dst = &mut buf[header + y * stride..header + y * stride + w * 3];
+            for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(4)) {
+                d.copy_from_slice(&s[..3]);
             }
         }
-    })?;
-    items.push((CF_DIB.0 as u32, dib));
-
-    let mut png_bytes = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut png_bytes, width, height);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_compression(png::Compression::Fast);
-        let written = enc.write_header().and_then(|mut wr| wr.write_image_data(rgba));
-        if written.is_err() {
-            png_bytes.clear();
-        }
-    }
-    let png_format = unsafe { RegisterClipboardFormatW(w!("PNG")) };
-    if !png_bytes.is_empty() && png_format != 0 {
-        if let Ok(mem) = global(png_bytes.len(), |buf| buf.copy_from_slice(&png_bytes)) {
-            items.push((png_format, mem));
-        }
-    }
-    set(items)
+    })
 }

@@ -32,14 +32,19 @@ sharing.
 |---|---|
 | `Alt+Shift+R` | Opens the picker. Step 1: drag an area (a click selects the whole screen), or switch the toolbar to **Window** (click a window) or **Display**. Step 2: drag the handles to resize, inside to move, outside to start over; set audio, cursor, frame rate and start delay on the toolbar (for this recording only); **Record** or Enter starts. Esc or right-click cancels. Press the hotkey again to stop recording. The microphone button is a placeholder for now. |
 | Hold `Alt+Shift+R` | After ~0.4 s a quick settings flyout opens: frame rate (up to the monitor's refresh rate), start delay (3/5/10 s), audio, cursor, and Record (Enter, or press the hotkey again). Choices there apply to that recording only and aren't saved. Esc or clicking away closes it. |
-| Tray icon | Left-click = record. Right-click = menu (open video, folder, capture options, settings, launch at startup, check for updates). Options changed here are saved. |
+| `Alt+Shift+S` | Screenshot. The screen freezes and the picker opens on it: drag an area (a click takes the whole screen), or switch to **Window** or **Display** and click one. It's taken as soon as you pick. The toolbar's cursor and delay options apply to this screenshot only; with a delay the area is taken live once the countdown ends. The camera and video buttons on the toolbar switch between screenshot and recording. |
+| Tray icon | Left-click = record. Right-click = menu (record, screenshot, open video, folder, capture options, settings, launch at startup, check for updates). Options changed here are saved. |
 | Editor | Space play/pause · I/O set start/end · ←/→ frame step (Shift: 1 s) · C crop (Enter done, Esc cancel) · Ctrl+C copy frame |
 
 With a start delay, the frame and a countdown pill appear after you select the region; its Cancel button (or
 the hotkey) cancels.
 
-Settings: `%APPDATA%\Clipikon\settings.json` (hotkey, fps where 0 = refresh rate, start delay, quality,
-output folder, audio offset). Recordings go to `Videos\Clipikon`.
+Screenshots are copied to the clipboard and saved as PNG in `Pictures\Screenshots\Clipikon`; click the
+notification to open one. The PNG is lossless but small: an image with few colors (most UI) is stored with a
+palette. The clipboard holds only the PNG, and makes a bitmap when an app that can't paste PNG asks for one.
+
+Settings: `%APPDATA%\Clipikon\settings.json` (hotkeys, fps where 0 = refresh rate, start delay, quality,
+output folder, audio offset, and for screenshots: folder, cursor, delay). Recordings go to `Videos\Clipikon`.
 
 ## Build
 

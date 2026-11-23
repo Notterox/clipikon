@@ -17,13 +17,19 @@ pub struct Settings {
     pub audio_offset_ms: i32,
     pub open_editor_after_recording: bool,
     pub output_folder: PathBuf,
+    pub screenshot_hotkey: String,
+    /// Where screenshots are saved (they are also copied to the clipboard).
+    pub screenshot_folder: PathBuf,
+    /// Draw the mouse cursor into screenshots.
+    pub screenshot_cursor: bool,
+    /// Seconds between picking the area and taking the screenshot (then taken live, not from the frozen screen).
+    pub screenshot_delay_secs: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        let videos = std::env::var_os("USERPROFILE")
-            .map(|p| PathBuf::from(p).join("Videos"))
-            .unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        let videos = home.join("Videos");
         Self {
             hotkey: "Alt+Shift+R".into(),
             fps: 60,
@@ -34,6 +40,10 @@ impl Default for Settings {
             audio_offset_ms: 0,
             open_editor_after_recording: true,
             output_folder: videos.join("Clipikon"),
+            screenshot_hotkey: "Alt+Shift+S".into(),
+            screenshot_folder: home.join("Pictures").join("Screenshots").join("Clipikon"),
+            screenshot_cursor: false,
+            screenshot_delay_secs: 0,
         }
     }
 }

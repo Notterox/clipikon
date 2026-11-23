@@ -20,9 +20,14 @@ use windows::core::{PCWSTR, w};
 
 const CLASS: PCWSTR = w!("ClipikonMain");
 const HOTKEY_ID: i32 = 1;
+const SHOT_HOTKEY_ID: i32 = 2;
 const FAIL_TIMER: usize = 2;
 const HOLD_TIMER: usize = 3;
 const COUNTDOWN_TIMER: usize = 4;
+/// Takes a screenshot once the tray menu has faded out.
+const SHOT_TIMER: usize = 5;
+/// Sent to the tray icon's window when its notification is clicked (not in the bindings' module).
+const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
 /// Holding the hotkey at least this long opens the quick settings flyout instead of the region picker.
 const HOLD_MS: u128 = 400;
 
@@ -60,6 +65,12 @@ struct App {
     updating: bool,
     /// A downloaded update waiting for the recording to be saved.
     pending_update: Option<crate::update::Ready>,
+    /// Screenshot area waiting for its delay, and whether to draw the cursor.
+    pending_shot: Option<(CaptureRegion, bool)>,
+    /// The last screenshot's PNG while it's on the clipboard, to make the bitmap from when an app asks.
+    clip_png: Option<Vec<u8>>,
+    /// The screenshot the current tray notification is about: clicking it opens the file.
+    balloon_file: Option<PathBuf>,
 }
 
 impl App {
@@ -82,6 +93,7 @@ mod menu_id {
     pub const RECORD: usize = 1;
     pub const OPEN_VIDEO: usize = 2;
     pub const OPEN_FOLDER: usize = 3;
+    pub const SCREENSHOT: usize = 4;
     pub const AUDIO: usize = 10;
     pub const CURSOR: usize = 11;
     pub const FPS_BASE: usize = 20; // + index into FPS_CHOICES
@@ -146,6 +158,9 @@ pub fn run(installed: bool) {
                 once: None,
                 updating: false,
                 pending_update: None,
+                pending_shot: None,
+                clip_png: None,
+                balloon_file: None,
             })
         });
         add_tray_icon(hwnd);
@@ -166,18 +181,25 @@ pub fn run(installed: bool) {
 
 // ---------- hotkey ----------
 
+/// Registers the record and screenshot hotkeys from the settings, and says which couldn't be.
 fn register_hotkey(hwnd: HWND) {
-    let gesture = app(|a| a.settings.hotkey.clone());
-    unsafe {
-        let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
+    let (record, shot) = app(|a| (a.settings.hotkey.clone(), a.settings.screenshot_hotkey.clone()));
+    let mut problems = Vec::new();
+    for (id, gesture) in [(HOTKEY_ID, record), (SHOT_HOTKEY_ID, shot)] {
+        unsafe {
+            let _ = UnregisterHotKey(Some(hwnd), id);
+        }
+        match parse_hotkey(&gesture) {
+            Ok((mods, vk)) => unsafe {
+                if RegisterHotKey(Some(hwnd), id, mods | MOD_NOREPEAT, vk).is_err() {
+                    problems.push(format!("Couldn't register {gesture}: another app may be using it."));
+                }
+            },
+            Err(e) => problems.push(e),
+        }
     }
-    match parse_hotkey(&gesture) {
-        Ok((mods, vk)) => unsafe {
-            if RegisterHotKey(Some(hwnd), HOTKEY_ID, mods | MOD_NOREPEAT, vk).is_err() {
-                notify(hwnd, &format!("Couldn't register {gesture}: another app may be using it. Change it in settings."));
-            }
-        },
-        Err(e) => notify(hwnd, &e),
+    if !problems.is_empty() {
+        notify(hwnd, &format!("{} Change it in settings.", problems.join(" ")));
     }
 }
 
@@ -403,6 +425,11 @@ fn welcome(hwnd: HWND) {
 }
 
 fn notify(hwnd: HWND, text: &str) {
+    APP.with(|a| {
+        if let Some(a) = a.borrow_mut().as_mut() {
+            a.balloon_file = None;
+        }
+    });
     let mut nid = tray_data(hwnd);
     nid.uFlags = NIF_INFO;
     copy_wide(&mut nid.szInfo, text);
@@ -563,6 +590,7 @@ fn show_menu(hwnd: HWND) {
     let s = app(|a| a.settings.clone());
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else { return };
     append_item(menu, menu_id::RECORD, &format!("Record region\t{}", s.hotkey), false);
+    append_item(menu, menu_id::SCREENSHOT, &format!("Take screenshot\t{}", s.screenshot_hotkey), false);
     append_item(menu, menu_id::OPEN_VIDEO, "Open video to trim…", false);
     append_item(menu, menu_id::OPEN_FOLDER, "Open recordings folder", false);
     append_separator(menu);
@@ -584,6 +612,9 @@ fn on_menu(hwnd: HWND, id: usize) {
     }
     match id {
         menu_id::RECORD => on_hotkey(hwnd),
+        menu_id::SCREENSHOT => unsafe {
+            SetTimer(Some(hwnd), SHOT_TIMER, 250, None); // let the menu fade out first
+        },
         menu_id::OPEN_VIDEO => {
             let dir = app(|a| a.settings.output_folder.clone());
             let mut dlg = rfd::FileDialog::new().add_filter("Videos", &["mp4", "mkv", "mov"]);
@@ -727,7 +758,7 @@ fn on_hotkey(hwnd: HWND) {
                 a.state = State::Selecting;
                 a.capture_settings().clone()
             });
-            overlay::select(hwnd, &list, &settings);
+            overlay::select(hwnd, &list, &settings, None);
         }
         State::Recording => stop_recording(hwnd),
         State::Countdown => cancel_countdown(hwnd),
@@ -750,13 +781,13 @@ pub fn ui_test() {
     unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let three_s = std::time::Duration::from_secs(3);
         match msg {
-            WM_APP_SELECTED => match unsafe { take_boxed::<Option<overlay::Selection>>(lp) } {
-                Some(overlay::Selection { region: r, .. }) => {
+            WM_APP_SELECTED => match unsafe { take_boxed::<overlay::Outcome>(lp) } {
+                overlay::Outcome::Record(overlay::Selection { region: r, .. }) => {
                     frame::show(hwnd, &r, Some(std::time::Instant::now() + three_s));
                     REGION.with(|x| *x.borrow_mut() = Some(r));
                     unsafe { SetTimer(Some(hwnd), 1, 3000, None) };
                 }
-                None => unsafe { PostQuitMessage(0) },
+                _ => unsafe { PostQuitMessage(0) },
             },
             WM_TIMER if wp.0 == 1 => {
                 unsafe {
@@ -779,7 +810,7 @@ pub fn ui_test() {
     frame::set_capturable(true); // so screenshots of the test show the pill
     register_class(w!("ClipikonUiTest"), proc, IDC_ARROW);
     let hwnd = create_window(WINDOW_EX_STYLE(0), w!("ClipikonUiTest"), WS_OVERLAPPED, RECT::default());
-    overlay::select(hwnd, &displays::enumerate(), &Settings::load());
+    overlay::select(hwnd, &displays::enumerate(), &Settings::load(), None);
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -803,13 +834,17 @@ unsafe fn take_boxed<T>(lp: LPARAM) -> T {
     unsafe { *Box::from_raw(lp.0 as *mut T) }
 }
 
-fn on_selected(hwnd: HWND, picked: Option<overlay::Selection>) {
-    let Some(overlay::Selection { region, settings }) = picked else {
-        app(|a| {
-            a.state = State::Idle;
-            a.once = None;
-        });
-        return;
+fn on_selected(hwnd: HWND, outcome: overlay::Outcome) {
+    let (region, settings) = match outcome {
+        overlay::Outcome::Record(overlay::Selection { region, settings }) => (region, settings),
+        overlay::Outcome::Screenshot { region, image, settings } => return on_shot_picked(hwnd, region, image, settings),
+        overlay::Outcome::Cancelled => {
+            app(|a| {
+                a.state = State::Idle;
+                a.once = None;
+            });
+            return;
+        }
     };
     // The picker's toolbar choices (starting from any hold-flyout ones) are for this recording only.
     app(|a| a.once = Some(settings));
@@ -834,6 +869,13 @@ fn countdown_done(hwnd: HWND) {
         let _ = KillTimer(Some(hwnd), COUNTDOWN_TIMER);
     }
     frame::close();
+    if let Some((region, cursor)) = app(|a| a.pending_shot.take()) {
+        app(|a| a.state = State::Idle);
+        return match take_live(&region, cursor) {
+            Some(image) => save_screenshot(hwnd, image),
+            None => message_box("Couldn't take the screenshot.", true),
+        };
+    }
     if let Some(region) = app(|a| a.pending.take()) {
         start_recorder(hwnd, region);
     }
@@ -846,9 +888,99 @@ fn cancel_countdown(hwnd: HWND) {
     frame::close();
     app(|a| {
         a.pending = None;
+        a.pending_shot = None;
         a.once = None;
         a.state = State::Idle;
     });
+}
+
+// ---------- screenshots ----------
+
+/// Freezes the screen and opens the picker on it.
+fn take_screenshot(hwnd: HWND) {
+    if app(|a| a.state) != State::Idle {
+        return;
+    }
+    let list = displays::enumerate();
+    let Some(grab) = crate::screenshot::grab(&list) else {
+        return message_box("Couldn't capture the screen.", true);
+    };
+    let settings = app(|a| {
+        a.state = State::Selecting;
+        a.capture_settings().clone()
+    });
+    overlay::select(hwnd, &list, &settings, Some(grab));
+}
+
+/// The picker chose an area: save the cut-out now, or wait out the delay and take it live.
+fn on_shot_picked(hwnd: HWND, region: CaptureRegion, image: Option<crate::screenshot::Image>, settings: Settings) {
+    app(|a| {
+        a.state = State::Idle;
+        a.once = None;
+    });
+    if let Some(image) = image {
+        return save_screenshot(hwnd, image);
+    }
+    let delay = settings.screenshot_delay_secs.max(1);
+    app(|a| {
+        a.state = State::Countdown;
+        a.pending_shot = Some((region.clone(), settings.screenshot_cursor));
+    });
+    // The frame and its countdown pill are excluded from capture, so they never show in the shot.
+    frame::show(hwnd, &region, Some(std::time::Instant::now() + std::time::Duration::from_secs(delay as u64)));
+    unsafe {
+        SetTimer(Some(hwnd), COUNTDOWN_TIMER, delay * 1000, None);
+    }
+}
+
+/// Takes `region` from the screen as it is now (after a delay).
+fn take_live(region: &CaptureRegion, cursor: bool) -> Option<crate::screenshot::Image> {
+    let (x, y) = (region.screen_x(), region.screen_y());
+    let frame = crate::screenshot::grab_rect(RECT { left: x, top: y, right: x + region.width, bottom: y + region.height })?;
+    if cursor && let Some(c) = crate::screenshot::Cursor::grab() {
+        c.draw(&frame, POINT { x, y });
+    }
+    Some(frame.to_image())
+}
+
+/// Encodes and saves off the UI thread; `on_shot_saved` then puts it on the clipboard.
+fn save_screenshot(hwnd: HWND, image: crate::screenshot::Image) {
+    let folder = app(|a| a.settings.screenshot_folder.clone());
+    let send = SendHwnd(hwnd.0 as isize);
+    std::thread::spawn(move || {
+        let png = crate::screenshot::encode_png(image.width, image.height, &image.bgra, crate::screenshot::Order::Bgra);
+        drop(image);
+        let file = png.as_ref().map_err(Clone::clone).and_then(|png| {
+            let file = folder.join(format!("Clipikon_{}.png", crate::timestamp_name()));
+            std::fs::create_dir_all(&folder)
+                .and_then(|_| std::fs::write(&file, png))
+                .map(|_| file)
+                .map_err(|e| format!("Couldn't save it to {}: {e}", folder.display()))
+        });
+        post_boxed(send.get(), WM_APP_SHOT_SAVED, (png, file));
+    });
+}
+
+fn on_shot_saved(hwnd: HWND, (png, file): (Result<Vec<u8>, String>, Result<PathBuf, String>)) {
+    let png = match png {
+        Ok(png) => png,
+        Err(e) => return message_box(&format!("Couldn't encode the screenshot: {e}"), true),
+    };
+    let copied = crate::clipboard::copy_png(hwnd, &png);
+    if copied.is_ok() {
+        app(|a| a.clip_png = Some(png));
+    }
+    let name = |f: &PathBuf| f.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let text = match (&copied, &file) {
+        (Ok(()), Ok(f)) => format!("Screenshot copied. Saved as {}; click to open it.", name(f)),
+        (Err(_), Ok(f)) => format!("Screenshot saved as {}, but the clipboard was busy; click to open it.", name(f)),
+        (Ok(()), Err(e)) => format!("Screenshot copied. {e}"),
+        (Err(c), Err(e)) => format!("Screenshot lost: the clipboard was busy ({c}). {e}"),
+    };
+    notify(hwnd, &text);
+    if let Ok(f) = file {
+        app(|a| a.balloon_file = Some(f));
+    }
 }
 
 fn start_recorder(hwnd: HWND, region: CaptureRegion) {
@@ -940,6 +1072,7 @@ impl SendHwnd {
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_HOTKEY if wp.0 as i32 == SHOT_HOTKEY_ID => take_screenshot(hwnd),
         WM_HOTKEY => on_hotkey_down(hwnd),
         WM_APP_STOP => match app(|a| a.state) {
             State::Recording => stop_recording(hwnd),
@@ -949,6 +1082,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_APP_TRAY => match lp.0 as u32 {
             WM_LBUTTONUP => on_hotkey(hwnd),
             WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
+            NIN_BALLOONUSERCLICK => {
+                if let Some(file) = app(|a| a.balloon_file.take()) {
+                    let _ = Command::new("explorer.exe").arg(file).spawn();
+                }
+            }
             _ => {}
         },
         WM_APP_SELECTED => on_selected(hwnd, unsafe { take_boxed(lp) }),
@@ -962,6 +1100,25 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_TIMER if wp.0 == FAIL_TIMER => check_failure(hwnd),
         WM_TIMER if wp.0 == HOLD_TIMER => check_hold(hwnd),
         WM_TIMER if wp.0 == COUNTDOWN_TIMER => countdown_done(hwnd),
+        WM_TIMER if wp.0 == SHOT_TIMER => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), SHOT_TIMER);
+            }
+            take_screenshot(hwnd);
+        }
+        WM_APP_SHOT_SAVED => on_shot_saved(hwnd, unsafe { take_boxed(lp) }),
+        // The screenshot's bitmap, made only when an app pastes it (see clipboard::copy_png).
+        WM_RENDERFORMAT if wp.0 as u32 == windows::Win32::System::Ole::CF_DIB.0 as u32 => {
+            if let Some(png) = app(|a| a.clip_png.clone()) {
+                crate::clipboard::render_dib(&png);
+            }
+        }
+        WM_RENDERALLFORMATS => {
+            if let Some(png) = app(|a| a.clip_png.take()) {
+                crate::clipboard::render_all(hwnd, &png);
+            }
+        }
+        WM_DESTROYCLIPBOARD => app(|a| a.clip_png = None),
         m if m == APP.with(|a| a.borrow().as_ref().map(|a| a.taskbar_created).unwrap_or(u32::MAX)) => add_tray_icon(hwnd),
         _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }

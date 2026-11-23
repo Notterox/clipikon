@@ -1,15 +1,21 @@
 //! Snipping-Tool-style region picker, in two steps. Step 1: drag an area, click a screen for all of it, or
 //! switch the toolbar to Window or Display. Step 2: the selection stays, with handles to move and resize it,
 //! and the toolbar beside it holds this recording's options and Record. The result is posted to the owner
-//! window as `WM_APP_SELECTED` with a boxed `Option<Selection>`.
+//! window as `WM_APP_SELECTED` with a boxed `Outcome`.
+//!
+//! For a screenshot the screen is frozen first (`screenshot::grab`) and there is no step 2: releasing the
+//! drag, or clicking a window or display, takes it. The toolbar switches between the two in place; all the
+//! picker's windows are hidden from capture, so the screen can be frozen while it's open.
 //!
 //! The dim layer is a color-keyed layered window per monitor (one constant alpha; the selection is a
 //! keyed-out hole), repainted only where the hole changes and right away rather than at the next WM_PAINT.
-//! Everything drawn on top (outline, handles, size label, hint, toolbar) is a separate per-pixel-alpha
-//! window, so it stays opaque and crisp instead of being dimmed along with the screen.
+//! When frozen, the same window is made opaque and paints a dimmed copy of the grab with the hole at full
+//! brightness. Everything drawn on top (outline, handles, size label, hint, toolbar) is a separate
+//! per-pixel-alpha window, so it stays opaque and crisp instead of being dimmed along with the screen.
 
 use crate::displays::{CaptureRegion, Display};
 use crate::layered::{Canvas, argb};
+use crate::screenshot::{Cursor, Frame, Grab, Image};
 use crate::settings::Settings;
 use crate::win::*;
 use std::cell::RefCell;
@@ -39,6 +45,20 @@ pub struct Selection {
     pub settings: Settings,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Kind {
+    Video,
+    Screenshot,
+}
+
+/// How the picker ended. `settings` are the toolbar's choices, for this capture only.
+pub enum Outcome {
+    Cancelled,
+    Record(Selection),
+    /// `image` is the area cut from the frozen screen, or None with a delay: it is taken live once that's over.
+    Screenshot { region: CaptureRegion, image: Option<Image>, settings: Settings },
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Region,
@@ -57,6 +77,7 @@ enum Drag {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Item {
+    Kind(Kind),
     Mode(Mode),
     Audio,
     Mic,
@@ -72,6 +93,8 @@ struct Overlay {
     display: Display,
     /// The hole as currently painted, in display-local pixels.
     hole: Option<RECT>,
+    /// Screenshot: the frozen display, as grabbed and dimmed.
+    frozen: Option<(Frame, Frame)>,
 }
 
 /// A per-pixel-alpha window drawn from a canvas (click-through unless it's the toolbar).
@@ -88,7 +111,9 @@ impl Layer {
         if click_through {
             ex |= WS_EX_TRANSPARENT;
         }
-        Self { hwnd: create_window(ex, class, WS_POPUP, RECT::default()), canvas: None, visible: false, pos: POINT::default() }
+        let hwnd = create_window(ex, class, WS_POPUP, RECT::default());
+        crate::frame::exclude_from_capture(hwnd);
+        Self { hwnd, canvas: None, visible: false, pos: POINT::default() }
     }
 
     /// Draws a `r`-sized canvas and shows it at `r` (screen coordinates), above the overlays.
@@ -137,6 +162,9 @@ struct Session {
     items: Vec<(Item, RECT)>,
     hover: Option<Item>,
     settings: Settings,
+    kind: Kind,
+    /// Screenshot: the mouse cursor as it was when the screen was frozen.
+    mouse: Option<Cursor>,
     mode: Mode,
     /// Display (index into `overlays`) with the selection, or under the cursor while there's none.
     active: usize,
@@ -158,7 +186,8 @@ fn with<R>(f: impl FnOnce(&mut Session) -> R) -> Option<R> {
 }
 
 /// Starts the picker; `settings` are the options it starts from (and returns, as changed on the toolbar).
-pub fn select(owner: HWND, displays: &[Display], settings: &Settings) {
+/// With `frozen` (one frame per display) it picks a screenshot of that frozen screen.
+pub fn select(owner: HWND, displays: &[Display], settings: &Settings, frozen: Option<Grab>) {
     register_class(CLASS, wnd_proc, IDC_CROSS);
     register_class(LAYER_CLASS, layer_proc, IDC_CROSS);
     register_class(TOOLBAR_CLASS, toolbar_proc, IDC_ARROW);
@@ -166,15 +195,23 @@ pub fn select(owner: HWND, displays: &[Display], settings: &Settings) {
     unsafe {
         let _ = GetCursorPos(&mut cursor);
     }
+    let kind = if frozen.is_some() { Kind::Screenshot } else { Kind::Video };
+    let (mut frames, mouse) = match frozen {
+        Some(g) => (g.frames.into_iter().map(Some).collect(), g.cursor),
+        None => (Vec::new(), None),
+    };
+    frames.resize_with(displays.len(), || None);
     let mut overlays = Vec::new();
-    for d in displays {
+    for (d, frame) in displays.iter().zip(frames) {
         let r = RECT { left: d.left, top: d.top, right: d.left + d.width, bottom: d.top + d.height };
         let hwnd = create_window(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, CLASS, WS_POPUP, r);
+        crate::frame::exclude_from_capture(hwnd);
         unsafe {
-            let _ = SetLayeredWindowAttributes(hwnd, KEY, DIM_ALPHA, LWA_COLORKEY | LWA_ALPHA);
+            // Invisible until its first paint is done (below), so it never shows a blank frame.
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
-        overlays.push(Overlay { hwnd, display: d.clone(), hole: None });
+        overlays.push(Overlay { hwnd, display: d.clone(), hole: None, frozen: dimmed_pair(frame) });
     }
     if overlays.is_empty() {
         return;
@@ -195,6 +232,8 @@ pub fn select(owner: HWND, displays: &[Display], settings: &Settings) {
         items: Vec::new(),
         hover: None,
         settings: settings.clone(),
+        kind,
+        mouse,
         mode: Mode::Region,
         active,
         sel: None,
@@ -211,6 +250,101 @@ pub fn select(owner: HWND, displays: &[Display], settings: &Settings) {
         let _ = SetFocus(Some(focus));
     }
     refresh();
+    for (hwnd, frozen) in overlay_looks() {
+        paint_now(hwnd);
+        set_look(hwnd, frozen);
+    }
+}
+
+/// A grabbed display and its dimmed copy (the same darkening the live overlay gives the screen).
+fn dimmed_pair(frame: Option<Frame>) -> Option<(Frame, Frame)> {
+    frame.and_then(|f| Some((f.dimmed(255 - DIM_ALPHA)?, f))).map(|(dim, f)| (f, dim))
+}
+
+/// The overlay is always a layered window; only how it's blended changes. Frozen: opaque, painting the dimmed
+/// grab with the hole at full brightness. Live: the black it paints is blended at `DIM_ALPHA` over the screen
+/// and the hole, painted in `KEY`, is cut out.
+fn set_look(hwnd: HWND, frozen: bool) {
+    unsafe {
+        let _ = if frozen {
+            SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)
+        } else {
+            SetLayeredWindowAttributes(hwnd, KEY, DIM_ALPHA, LWA_COLORKEY | LWA_ALPHA)
+        };
+    }
+}
+
+fn paint_now(hwnd: HWND) {
+    unsafe {
+        let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+    }
+}
+
+/// Each overlay and whether it's frozen. Painting reads the session, so it happens outside its borrow.
+fn overlay_looks() -> Vec<(HWND, bool)> {
+    with(|s| s.overlays.iter().map(|o| (o.hwnd, o.frozen.is_some())).collect()).unwrap_or_default()
+}
+
+/// The toolbar's camera/video buttons: turns the open picker into the other kind. A screenshot freezes the
+/// screen as it is under the picker (whose windows capture can't see).
+fn switch_kind(kind: Kind) {
+    let Some(displays) = with(|s| (s.kind != kind).then(|| s.overlays.iter().map(|o| o.display.clone()).collect::<Vec<_>>())).flatten()
+    else {
+        return;
+    };
+    let grab = match kind {
+        Kind::Screenshot => match crate::screenshot::grab(&displays) {
+            Some(g) => Some(g),
+            None => return, // couldn't capture: stay as is
+        },
+        Kind::Video => None,
+    };
+    with(|s| {
+        let (mut frames, mouse) = match grab {
+            Some(g) => (g.frames.into_iter().map(Some).collect(), g.cursor),
+            None => (Vec::new(), None),
+        };
+        frames.resize_with(s.overlays.len(), || None);
+        for (o, f) in s.overlays.iter_mut().zip(frames) {
+            o.frozen = dimmed_pair(f);
+        }
+        s.kind = kind;
+        s.mouse = mouse;
+        s.drag = None;
+        // Carry the mode over: a screenshot has no settled selection, a recording's Display mode selects one.
+        let d = s.overlays[s.active].display.clone();
+        s.sel = None;
+        s.preview = None;
+        match (kind, s.mode) {
+            (Kind::Screenshot, Mode::Display) => s.preview = Some(whole(&d)),
+            (Kind::Video, Mode::Display) => s.sel = Some(full(&d)),
+            _ => {}
+        }
+    });
+    match kind {
+        // The frozen look is painted first (at the live blend for a moment it looks just like the live screen),
+        // then made opaque.
+        Kind::Screenshot => {
+            refresh();
+            for (hwnd, _) in overlay_looks() {
+                paint_now(hwnd);
+                set_look(hwnd, true);
+            }
+        }
+        // Changing the blend drops what the window showed until it repaints, so the change and the repaint go
+        // right after a composition, to land in the same next frame; the slower layers (toolbar) come after.
+        Kind::Video => {
+            update_holes();
+            unsafe {
+                let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+            }
+            for (hwnd, _) in overlay_looks() {
+                set_look(hwnd, false);
+                paint_now(hwnd);
+            }
+            refresh();
+        }
+    }
 }
 
 /// Puts the visible layers back above the overlays (an overlay that gets activated, e.g. by a click, is
@@ -226,7 +360,7 @@ fn raise_layers() {
     });
 }
 
-fn finish(result: Option<Selection>) {
+fn finish(result: Outcome) {
     let Some(s) = SESSION.with(|s| s.borrow_mut().take()) else { return };
     unsafe {
         let layers = s.edges.iter().chain(&s.handles).chain([&s.size_label, &s.hint, &s.toolbar, &s.tip]);
@@ -245,18 +379,61 @@ fn finish(result: Option<Selection>) {
 
 fn record() {
     let picked = with(|s| {
-        let r = s.sel?;
+        let r = s.sel.filter(|_| s.kind == Kind::Video)?;
         let d = &s.overlays[s.active].display;
         Some(Selection { region: CaptureRegion::from_drag(d, r.left, r.top, r.right, r.bottom), settings: s.settings.clone() })
     })
     .flatten();
-    if picked.is_some() {
-        finish(picked);
+    if let Some(p) = picked {
+        finish(Outcome::Record(p));
     }
 }
 
+/// Takes the screenshot of `r` (the active display's pixels): cut from the frozen screen, with the cursor
+/// if that's on, or left for later with a delay.
+fn shoot(r: RECT) {
+    let outcome = with(|s| {
+        let o = &s.overlays[s.active];
+        let d = o.display.clone();
+        let region = CaptureRegion { display: d.clone(), x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top };
+        let image = if s.settings.screenshot_delay_secs > 0 {
+            None
+        } else {
+            o.frozen.as_ref().and_then(|(frame, _)| {
+                let cut = frame.crop(r)?;
+                if s.settings.screenshot_cursor
+                    && let Some(m) = &s.mouse
+                {
+                    m.draw(&cut, POINT { x: d.left + r.left, y: d.top + r.top });
+                }
+                Some(cut.to_image())
+            })
+        };
+        Outcome::Screenshot { region, image, settings: s.settings.clone() }
+    });
+    if let Some(o) = outcome {
+        finish(o);
+    }
+}
+
+/// A whole display, as recorded (even size, for the encoder).
 fn full(d: &Display) -> RECT {
     RECT { left: 0, top: 0, right: d.width & !1, bottom: d.height & !1 }
+}
+
+/// A whole display, to the last pixel.
+fn whole(d: &Display) -> RECT {
+    RECT { left: 0, top: 0, right: d.width, bottom: d.height }
+}
+
+/// What a drag (display-local) turns into: for a recording, as `as_recorded`; for a screenshot, the rect as
+/// drawn, or the whole display for a click.
+fn fitted(kind: Kind, d: &Display, r: RECT) -> RECT {
+    match kind {
+        Kind::Video => as_recorded(d, r),
+        Kind::Screenshot if r.right - r.left < 4 && r.bottom - r.top < 4 => whole(d),
+        Kind::Screenshot => RECT { left: r.left.max(0), top: r.top.max(0), right: r.right.min(d.width), bottom: r.bottom.min(d.height) },
+    }
 }
 
 fn normalized(a: POINT, b: POINT) -> RECT {
@@ -365,6 +542,16 @@ fn window_preview(d: &Display, p: POINT) -> Option<RECT> {
 }
 
 // ---- drawing ----
+
+/// Records the holes the session state calls for, without painting them.
+fn update_holes() {
+    with(|s| {
+        let (shown, active) = (shown_rect(s), s.active);
+        for (i, o) in s.overlays.iter_mut().enumerate() {
+            o.hole = if i == active { shown } else { None };
+        }
+    });
+}
 
 /// Brings every window in line with the session state.
 fn refresh() {
@@ -479,7 +666,7 @@ fn draw_layers(s: &mut Session) {
     match shown {
         Some(r) => {
             let local = RECT { left: r.left - d.left, top: r.top - d.top, right: r.right - d.left, bottom: r.bottom - d.top };
-            let rec = as_recorded(&d, local);
+            let rec = if new_drag && s.kind == Kind::Screenshot { local } else { fitted(s.kind, &d, local) };
             let text = format!("{} × {}", rec.right - rec.left, rec.bottom - rec.top);
             let Some(m) = Canvas::new(1, 1) else { return };
             let (tw, th) = m.text_size(&text, px(13.0), true);
@@ -526,9 +713,12 @@ fn draw_layers(s: &mut Session) {
 
     // Hint under the toolbar while nothing is selected.
     if s.sel.is_none() {
-        let text = match s.mode {
-            Mode::Window => "Click a window to select it  ·  Esc to cancel",
-            _ => "Drag to select an area  ·  Click to select the whole screen  ·  Esc to cancel",
+        let text = match (s.kind, s.mode) {
+            (Kind::Video, Mode::Window) => "Click a window to select it  ·  Esc to cancel",
+            (Kind::Video, _) => "Drag to select an area  ·  Click to select the whole screen  ·  Esc to cancel",
+            (Kind::Screenshot, Mode::Region) => "Drag to capture an area  ·  Click to capture the whole screen  ·  Esc to cancel",
+            (Kind::Screenshot, Mode::Window) => "Click a window to capture it  ·  Esc to cancel",
+            (Kind::Screenshot, Mode::Display) => "Click a screen to capture it  ·  Esc to cancel",
         };
         let Some(m) = Canvas::new(1, 1) else { return };
         let (tw, th) = m.text_size(text, px(14.0), false);
@@ -547,7 +737,7 @@ fn draw_layers(s: &mut Session) {
     // Tooltip under the hovered toolbar item.
     match s.hover.and_then(|i| s.items.iter().find(|(it, _)| *it == i).copied()) {
         Some((item, ir)) => {
-            let text = tooltip(item, &s.settings);
+            let text = tooltip(item, &s.settings, s.kind);
             let Some(m) = Canvas::new(1, 1) else { return };
             let (tw, th) = m.text_size(&text, px(12.0), false);
             let (padx, pady) = (px(8.0), px(4.0));
@@ -575,16 +765,28 @@ fn delay_label(secs: u32) -> String {
     if secs == 0 { "No delay".into() } else { format!("{secs} s delay") }
 }
 
-fn tooltip(item: Item, s: &Settings) -> String {
+/// The cursor and delay options of `kind`: screenshots keep their own.
+fn cursor_on(s: &Settings, kind: Kind) -> bool {
+    if kind == Kind::Screenshot { s.screenshot_cursor } else { s.draw_mouse }
+}
+
+fn delay_of(s: &Settings, kind: Kind) -> u32 {
+    if kind == Kind::Screenshot { s.screenshot_delay_secs } else { s.start_delay_secs }
+}
+
+fn tooltip(item: Item, s: &Settings, kind: Kind) -> String {
     let on_off = |b: bool| if b { "on" } else { "off" };
     match item {
+        Item::Kind(Kind::Screenshot) => format!("Screenshot ({})", s.screenshot_hotkey),
+        Item::Kind(Kind::Video) => format!("Record video ({})", s.hotkey),
         Item::Mode(Mode::Region) => "Select an area".into(),
         Item::Mode(Mode::Window) => "Select a window".into(),
         Item::Mode(Mode::Display) => "Whole screen".into(),
         Item::Audio => format!("System audio: {}", on_off(s.capture_system_audio)),
         Item::Mic => "Microphone recording is coming soon".into(),
-        Item::Cursor => format!("Mouse cursor: {}", on_off(s.draw_mouse)),
+        Item::Cursor => format!("Mouse cursor: {}", on_off(cursor_on(s, kind))),
         Item::Fps => "Frame rate".into(),
+        Item::Delay if kind == Kind::Screenshot => "Wait before taking the screenshot".into(),
         Item::Delay => "Wait before recording starts".into(),
         Item::Record => "Start recording (Enter)".into(),
         Item::Cancel => "Cancel (Esc)".into(),
@@ -599,26 +801,35 @@ fn draw_toolbar(s: &mut Session, scale: f64, at: Option<RECT>) -> (i32, i32) {
     let (h, ih, pad) = (px(48.0), px(38.0), px(5.0));
     let text_px = px(14.0);
     let glyph_px = px(16.0);
+    let kind = s.kind;
     let fps = fps_label(s.settings.fps, hz);
-    let delay = delay_label(s.settings.start_delay_secs);
+    let delay = delay_label(delay_of(&s.settings, kind));
 
     // (item, width, separator before it)
     let text_w = |t: &str, bold: bool| m.text_size(t, text_px, bold).0;
     let seg = |t: &str| px(12.0) + glyph_px + px(8.0) + text_w(t, false) + px(12.0);
     let drop = |t: &str| px(12.0) + text_w(t, false) + px(8.0) + px(12.0) + px(10.0);
     let square = px(38.0);
-    let layout: Vec<(Item, i32, bool)> = vec![
-        (Item::Mode(Mode::Region), seg("Region"), false),
+    let mut layout: Vec<(Item, i32, bool)> = vec![
+        (Item::Kind(Kind::Screenshot), square, false),
+        (Item::Kind(Kind::Video), square, false),
+        (Item::Mode(Mode::Region), seg("Region"), true),
         (Item::Mode(Mode::Window), seg("Window"), false),
         (Item::Mode(Mode::Display), seg("Display"), false),
-        (Item::Audio, square, true),
-        (Item::Mic, square, false),
-        (Item::Cursor, square, false),
-        (Item::Fps, drop(&fps), false),
-        (Item::Delay, drop(&delay), false),
-        (Item::Record, px(14.0) + px(10.0) + px(8.0) + text_w("Record", true) + px(14.0), true),
-        (Item::Cancel, square, false),
     ];
+    match kind {
+        Kind::Video => layout.extend([
+            (Item::Audio, square, true),
+            (Item::Mic, square, false),
+            (Item::Cursor, square, false),
+            (Item::Fps, drop(&fps), false),
+            (Item::Delay, drop(&delay), false),
+            (Item::Record, px(14.0) + px(10.0) + px(8.0) + text_w("Record", true) + px(14.0), true),
+            (Item::Cancel, square, false),
+        ]),
+        // A screenshot is taken as soon as the area is picked: no button for it.
+        Kind::Screenshot => layout.extend([(Item::Cursor, square, true), (Item::Delay, drop(&delay), false), (Item::Cancel, square, true)]),
+    }
     let mut items = Vec::new();
     let mut x = pad;
     for (item, w, sep) in &layout {
@@ -645,7 +856,7 @@ fn draw_toolbar(s: &mut Session, scale: f64, at: Option<RECT>) -> (i32, i32) {
         for (item, r) in &items {
             let hovered = hover == Some(*item);
             let enabled = !matches!(item, Item::Mic) && (*item != Item::Record || has_sel);
-            let selected = *item == Item::Mode(mode);
+            let selected = *item == Item::Mode(mode) || *item == Item::Kind(kind);
             let bg = match item {
                 Item::Record if enabled => Some(if hovered { argb(255, 0xD6, 0x3A, 0x2C) } else { argb(255, 0xC4, 0x2B, 0x1C) }),
                 Item::Record => Some(argb(255, 0x3A, 0x3A, 0x3A)),
@@ -659,6 +870,10 @@ fn draw_toolbar(s: &mut Session, scale: f64, at: Option<RECT>) -> (i32, i32) {
             let fg = if !enabled { disabled } else if selected { white } else { dim };
             let glyph_rect = |left: i32| RECT { left, top: r.top, right: left + glyph_px + px(4.0), bottom: r.bottom };
             match item {
+                Item::Kind(k) => {
+                    let g = if *k == Kind::Screenshot { "\u{E722}" } else { "\u{E714}" }; // camera, video
+                    c.glyph(*r, g, glyph_px, fg);
+                }
                 Item::Mode(m) => {
                     let (g, label) = match m {
                         Mode::Region => ("\u{E8B3}", "Region"),
@@ -678,7 +893,7 @@ fn draw_toolbar(s: &mut Session, scale: f64, at: Option<RECT>) -> (i32, i32) {
                         Item::Audio if settings.capture_system_audio => ("\u{E767}", true),
                         Item::Audio => ("\u{E74F}", false),
                         Item::Mic => ("\u{E720}", false),
-                        _ => ("\u{E8B0}", settings.draw_mouse),
+                        _ => ("\u{E8B0}", cursor_on(&settings, kind)),
                     };
                     let color = if !enabled { disabled } else if on { accent } else { dim };
                     c.glyph(*r, g, glyph_px, color);
@@ -718,6 +933,27 @@ fn local(d: &Display) -> POINT {
 }
 
 fn on_mouse_down(hwnd: HWND, lp: LPARAM) {
+    // A screenshot of a window or display is taken right on the click.
+    let instant = with(|s| {
+        let i = overlay_index(s, hwnd)?;
+        if s.kind != Kind::Screenshot || s.mode == Mode::Region {
+            return None;
+        }
+        let d = s.overlays[i].display.clone();
+        s.active = i;
+        let mut screen = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut screen);
+        }
+        Some(match s.mode {
+            Mode::Window => window_preview(&d, screen).unwrap_or_else(|| whole(&d)),
+            _ => whole(&d),
+        })
+    })
+    .flatten();
+    if let Some(r) = instant {
+        return shoot(r);
+    }
     let capture = with(|s| {
         let i = overlay_index(s, hwnd)?;
         let d = s.overlays[i].display.clone();
@@ -783,6 +1019,11 @@ fn on_mouse_move(hwnd: HWND) {
             changed |= preview != s.preview;
             s.preview = preview;
         }
+        if s.kind == Kind::Screenshot && s.mode == Mode::Display {
+            // The screen that a click would capture.
+            changed |= s.preview != Some(whole(&d));
+            s.preview = Some(whole(&d));
+        }
         if s.hover.take().is_some() {
             changed = true;
         }
@@ -795,10 +1036,13 @@ fn on_mouse_move(hwnd: HWND) {
 }
 
 fn on_mouse_up() {
-    with(|s| {
-        let Some(drag) = s.drag.take() else { return };
+    let shot = with(|s| {
+        let Some(drag) = s.drag.take() else { return None };
         let d = s.overlays[s.active].display.clone();
         let r = drag_rect(drag, s.cursor, &d);
+        if s.kind == Kind::Screenshot {
+            return Some(fitted(s.kind, &d, r));
+        }
         // A click (no real drag) selects the whole screen; tiny drags grow to the minimum.
         // A resized or moved window/display pick is now just an area.
         if let Drag::Move { orig, .. } | Drag::Resize { orig, .. } = drag
@@ -807,18 +1051,23 @@ fn on_mouse_up() {
             s.mode = Mode::Region;
         }
         s.sel = Some(as_recorded(&d, r));
-    });
+        None
+    })
+    .flatten();
     unsafe {
         let _ = ReleaseCapture();
     }
-    refresh();
+    match shot {
+        Some(r) => shoot(r),
+        None => refresh(),
+    }
 }
 
 fn cursor_for(hwnd: HWND) -> PCWSTR {
     with(|s| {
         let i = overlay_index(s, hwnd)?;
         let d = &s.overlays[i].display;
-        if s.mode == Mode::Window && s.sel.is_none() {
+        if (s.mode == Mode::Window && s.sel.is_none()) || (s.kind == Kind::Screenshot && s.mode == Mode::Display) {
             return Some(IDC_HAND);
         }
         let drag = match s.drag {
@@ -845,9 +1094,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_LBUTTONDOWN => on_mouse_down(hwnd, lp),
         WM_MOUSEMOVE => on_mouse_move(hwnd),
         WM_LBUTTONUP => on_mouse_up(),
-        WM_RBUTTONUP => finish(None),
+        WM_RBUTTONUP => finish(Outcome::Cancelled),
         WM_ACTIVATE if (wp.0 & 0xFFFF) as u32 != WA_INACTIVE => raise_layers(),
-        WM_KEYDOWN if wp.0 as u16 == VK_ESCAPE.0 => finish(None),
+        WM_KEYDOWN if wp.0 as u16 == VK_ESCAPE.0 => finish(Outcome::Cancelled),
         WM_KEYDOWN if wp.0 as u16 == VK_RETURN.0 => record(),
         WM_SETCURSOR => unsafe {
             SetCursor(LoadCursorW(None, cursor_for(hwnd)).ok());
@@ -857,13 +1106,33 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_PAINT => {
             // Straight to the window DC: the update region is usually a few thin strips and painting is
             // clipped to it, so double buffering would only add a full-screen cost.
-            let hole = with(|s| s.overlays.iter().find(|o| o.hwnd == hwnd).and_then(|o| o.hole)).flatten();
+            let (hole, frozen) = with(|s| {
+                let o = s.overlays.iter().find(|o| o.hwnd == hwnd)?;
+                Some((o.hole, o.frozen.as_ref().map(|(bright, dim)| (bright.dc, dim.dc))))
+            })
+            .flatten()
+            .unwrap_or_default();
             unsafe {
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
-                fill(hdc, ps.rcPaint, rgb(0, 0, 0));
-                if let Some(h) = hole {
-                    fill(hdc, h, KEY);
+                let p = ps.rcPaint;
+                match frozen {
+                    // The frozen screen: dimmed, and at full brightness in the hole.
+                    Some((bright, dim)) => {
+                        let _ = BitBlt(hdc, p.left, p.top, p.right - p.left, p.bottom - p.top, Some(dim), p.left, p.top, SRCCOPY);
+                        let mut h = RECT::default();
+                        if let Some(hole) = hole
+                            && IntersectRect(&mut h, &hole, &p).as_bool()
+                        {
+                            let _ = BitBlt(hdc, h.left, h.top, h.right - h.left, h.bottom - h.top, Some(bright), h.left, h.top, SRCCOPY);
+                        }
+                    }
+                    None => {
+                        fill(hdc, p, rgb(0, 0, 0));
+                        if let Some(h) = hole {
+                            fill(hdc, h, KEY);
+                        }
+                    }
                 }
                 let _ = EndPaint(hwnd, &ps);
             }
@@ -908,7 +1177,8 @@ fn pick(item: Item, choices: &[(u32, String, bool)]) -> Option<u32> {
 fn on_toolbar_click(item: Item) {
     match item {
         Item::Record => return record(),
-        Item::Cancel => return finish(None),
+        Item::Cancel => return finish(Outcome::Cancelled),
+        Item::Kind(k) => return switch_kind(k),
         Item::Fps => {
             let Some((current, hz)) = with(|s| (s.settings.fps, s.overlays[s.active].display.refresh_hz)) else { return };
             let mut choices: Vec<(u32, String, bool)> =
@@ -920,10 +1190,13 @@ fn on_toolbar_click(item: Item) {
             }
         }
         Item::Delay => {
-            let Some(current) = with(|s| s.settings.start_delay_secs) else { return };
+            let Some(current) = with(|s| delay_of(&s.settings, s.kind)) else { return };
             let choices: Vec<(u32, String, bool)> = [0, 3, 5, 10].into_iter().map(|d| (d, delay_label(d), current == d)).collect();
             if let Some(d) = pick(item, &choices) {
-                with(|s| s.settings.start_delay_secs = d);
+                with(|s| match s.kind {
+                    Kind::Screenshot => s.settings.screenshot_delay_secs = d,
+                    Kind::Video => s.settings.start_delay_secs = d,
+                });
             }
         }
         _ => {
@@ -940,12 +1213,17 @@ fn on_toolbar_click(item: Item) {
                     s.mode = Mode::Window;
                     s.sel = None; // pick one by hovering
                 }
+                Item::Mode(Mode::Display) if s.kind == Kind::Screenshot => {
+                    s.mode = Mode::Display; // pick a screen by clicking it
+                    s.preview = Some(whole(&s.overlays[s.active].display));
+                }
                 Item::Mode(Mode::Display) => {
                     s.mode = Mode::Display;
                     s.preview = None;
                     s.sel = Some(full(&s.overlays[s.active].display));
                 }
                 Item::Audio => s.settings.capture_system_audio = !s.settings.capture_system_audio,
+                Item::Cursor if s.kind == Kind::Screenshot => s.settings.screenshot_cursor = !s.settings.screenshot_cursor,
                 Item::Cursor => s.settings.draw_mouse = !s.settings.draw_mouse,
                 _ => {}
             });

@@ -43,6 +43,15 @@ pub fn set_capturable(on: bool) {
     CAPTURABLE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Hides `hwnd` from screen capture (recordings, screenshots), unless `set_capturable` says otherwise.
+pub fn exclude_from_capture(hwnd: HWND) {
+    if !CAPTURABLE.load(std::sync::atomic::Ordering::Relaxed) {
+        unsafe {
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        }
+    }
+}
+
 /// `countdown_end`: show "Starting in N" with a Cancel button until then, instead of the recording timer.
 /// The button posts `WM_APP_STOP` to `owner` either way.
 pub fn show(owner: HWND, r: &CaptureRegion, countdown_end: Option<Instant>) {
@@ -88,9 +97,7 @@ pub fn show(owner: HWND, r: &CaptureRegion, countdown_end: Option<Instant>) {
     unsafe {
         let _ = SetLayeredWindowAttributes(border, KEY, 255, LWA_COLORKEY);
         for hwnd in [border, pill] {
-            if !CAPTURABLE.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-            }
+            exclude_from_capture(hwnd);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
         SetTimer(Some(pill), 1, 250, None);
