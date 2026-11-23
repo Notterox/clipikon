@@ -28,6 +28,7 @@ mod preview;
 mod quickmenu;
 mod recorder;
 mod settings;
+mod update;
 mod video_view;
 mod win;
 
@@ -51,8 +52,10 @@ fn main() {
         }
         [cmd, rest @ ..] if cmd == "--record-test" => record_test(rest),
         [cmd] if cmd == "--ui-test" => daemon::ui_test(),
+        // Passed by the installer's "Start Clipikon" checkbox on a first install.
+        [cmd] if cmd == "--installed" => daemon::run(true),
         [file] if PathBuf::from(file).is_file() => open_editor(PathBuf::from(file)),
-        _ => daemon::run(),
+        _ => daemon::run(false),
     }
 }
 

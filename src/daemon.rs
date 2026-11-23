@@ -10,9 +10,9 @@ use crate::{frame, overlay};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::Command;
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -56,6 +56,10 @@ struct App {
     quick_gen: u32,
     /// Settings for the next recording only (chosen in the flyout); dropped once it starts or is cancelled.
     once: Option<Settings>,
+    /// An update check or download is under way.
+    updating: bool,
+    /// A downloaded update waiting for the recording to be saved.
+    pending_update: Option<crate::update::Ready>,
 }
 
 impl App {
@@ -85,6 +89,7 @@ mod menu_id {
     pub const RELOAD_SETTINGS: usize = 31;
     pub const AUTOSTART: usize = 32;
     pub const ABOUT: usize = 40;
+    pub const UPDATE: usize = 41;
     pub const DELAY_BASE: usize = 50; // + index into DELAY_CHOICES
     pub const EXIT: usize = 99;
 }
@@ -92,13 +97,31 @@ mod menu_id {
 const FPS_CHOICES: [u32; 5] = [0, 30, 60, 120, 144];
 const DELAY_CHOICES: [u32; 4] = [0, 3, 5, 10];
 
-pub fn run() {
+thread_local! {
+    /// The single-instance mutex, closed early when an update hands over to the installer or the new exe.
+    static INSTANCE: std::cell::Cell<Option<HANDLE>> = const { std::cell::Cell::new(None) };
+}
+
+/// Lets another Clipikon start (or the installer run) while this one is shutting down.
+fn release_instance() {
+    if let Some(h) = INSTANCE.with(|c| c.take()) {
+        unsafe {
+            let _ = ReleaseMutex(h);
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
+/// `installed`: started by the installer's last page, so show how to record.
+pub fn run(installed: bool) {
     unsafe {
-        let _mutex = CreateMutexW(None, true, w!("Clipikon.SingleInstance"));
+        let mutex = CreateMutexW(None, true, w!("Clipikon.SingleInstance"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             message_box("Clipikon is already running (see the tray).", false);
             return;
         }
+        INSTANCE.with(|c| c.set(mutex.ok()));
+        crate::update::clean_up();
 
         if crate::ffmpeg::find().is_none() {
             message_box("ffmpeg.exe was not found. Put it next to clipikon.exe or on PATH; recording won't work until then.", true);
@@ -121,12 +144,16 @@ pub fn run() {
                 quick: None,
                 quick_gen: 0,
                 once: None,
+                updating: false,
+                pending_update: None,
             })
         });
         add_tray_icon(hwnd);
         register_hotkey(hwnd);
         crate::autostart::repair();
-        welcome(hwnd);
+        if installed {
+            welcome(hwnd);
+        }
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -148,8 +175,6 @@ fn register_hotkey(hwnd: HWND) {
         Ok((mods, vk)) => unsafe {
             if RegisterHotKey(Some(hwnd), HOTKEY_ID, mods | MOD_NOREPEAT, vk).is_err() {
                 notify(hwnd, &format!("Couldn't register {gesture}: another app may be using it. Change it in settings."));
-            } else {
-                notify(hwnd, &format!("Press {gesture} to record a region. Hold it for frame rate, delay and audio options."));
             }
         },
         Err(e) => notify(hwnd, &e),
@@ -371,17 +396,10 @@ fn set_tip(hwnd: HWND, tip: &str) {
     }
 }
 
-/// On first start, a tray notification saying how to record, since the app has no window of its own.
+/// After installation, a tray notification saying how to record, since the app has no window of its own.
 fn welcome(hwnd: HWND) {
-    let (shown, hotkey) = app(|a| (a.settings.welcome_shown, a.settings.hotkey.clone()));
-    if shown {
-        return;
-    }
-    notify(hwnd, &format!("Press {hotkey} to record a region. Right-click this icon for options."));
-    app(|a| {
-        a.settings.welcome_shown = true;
-        a.settings.save();
-    });
+    let hotkey = app(|a| a.settings.hotkey.clone());
+    notify(hwnd, &format!("Press {hotkey} to record a region. Hold it for more options, or right-click this icon."));
 }
 
 fn notify(hwnd: HWND, text: &str) {
@@ -553,6 +571,7 @@ fn show_menu(hwnd: HWND) {
     append_item(menu, menu_id::RELOAD_SETTINGS, "Reload settings", false);
     append_separator(menu);
     append_item(menu, menu_id::AUTOSTART, "Launch at startup", crate::autostart::enabled());
+    append_item(menu, menu_id::UPDATE, "Check for updates…", false);
     append_item(menu, menu_id::ABOUT, "About Clipikon", false);
     append_item(menu, menu_id::EXIT, "Exit", false);
     let cmd = track_menu(hwnd, menu);
@@ -589,6 +608,7 @@ fn on_menu(hwnd: HWND, id: usize) {
         }
         menu_id::AUTOSTART => crate::autostart::set(!crate::autostart::enabled()),
         menu_id::ABOUT => show_about(),
+        menu_id::UPDATE => check_for_updates(hwnd),
         menu_id::EXIT => match app(|a| a.state) {
             State::Recording | State::Stopping => {
                 app(|a| a.quit_after_stop = true);
@@ -615,6 +635,76 @@ fn show_about() {
     }
     #[cfg(not(linked_ffmpeg))]
     message_box(&text, false);
+}
+
+// ---------- updates ----------
+
+fn check_for_updates(hwnd: HWND) {
+    if app(|a| std::mem::replace(&mut a.updating, true)) {
+        return notify(hwnd, "Already checking for updates.");
+    }
+    let send = SendHwnd(hwnd.0 as isize);
+    std::thread::spawn(move || post_boxed(send.get(), WM_APP_UPDATE_CHECKED, crate::update::check()));
+}
+
+fn on_update_checked(hwnd: HWND, result: Result<Option<crate::update::Release>, String>) {
+    let current = crate::update::CURRENT;
+    let release = match result {
+        Ok(Some(release)) => release,
+        Ok(None) => {
+            app(|a| a.updating = false);
+            return notify(hwnd, &format!("Clipikon {current} is the latest version."));
+        }
+        Err(e) => {
+            app(|a| a.updating = false);
+            return message_box(&format!("Couldn't check for updates.
+{e}"), true);
+        }
+    };
+    let text = wide(&format!(
+        "Clipikon {} is available (you have {current}).
+
+Update now? Clipikon closes its windows and restarts.",
+        release.version
+    ));
+    let answer = unsafe { MessageBoxW(None, PCWSTR(text.as_ptr()), w!("Clipikon update"), MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND) };
+    if answer != IDYES {
+        app(|a| a.updating = false);
+        return;
+    }
+    notify(hwnd, &format!("Downloading Clipikon {}…", release.version));
+    let send = SendHwnd(hwnd.0 as isize);
+    std::thread::spawn(move || post_boxed(send.get(), WM_APP_UPDATE_READY, crate::update::download(&release)));
+}
+
+fn on_update_ready(hwnd: HWND, result: Result<crate::update::Ready, String>) {
+    match result {
+        Ok(ready) if matches!(app(|a| a.state), State::Starting | State::Recording | State::Stopping) => {
+            app(|a| a.pending_update = Some(ready));
+            notify(hwnd, "Clipikon will update once this recording is saved.");
+        }
+        Ok(ready) => apply_update(&ready),
+        Err(e) => {
+            app(|a| a.updating = false);
+            message_box(&format!("Couldn't update Clipikon.
+{e}"), true);
+        }
+    }
+}
+
+/// Hands over to the installer or the new exe, and quits.
+fn apply_update(ready: &crate::update::Ready) {
+    match crate::update::launch(ready) {
+        Ok(()) => {
+            release_instance();
+            unsafe { PostQuitMessage(0) };
+        }
+        Err(e) => {
+            app(|a| a.updating = false);
+            message_box(&format!("Couldn't start the update.
+{e}"), true);
+        }
+    }
 }
 
 pub fn open_editor(file: &std::path::Path) {
@@ -826,6 +916,9 @@ fn on_stopped(hwnd: HWND, result: Result<PathBuf, String>) {
         Ok(file) => notify(hwnd, &format!("Saved {}", file.file_name().unwrap_or_default().to_string_lossy())),
         Err(e) => message_box(&e, true),
     }
+    if let Some(ready) = app(|a| a.pending_update.take()) {
+        apply_update(&ready);
+    }
 }
 
 fn check_failure(hwnd: HWND) {
@@ -864,6 +957,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         // Light/dark taskbar switches arrive as a setting change.
         WM_SETTINGCHANGE => update_tray_icon(hwnd),
         WM_APP_QUICK_DONE => on_quick_done(hwnd, unsafe { take_boxed(lp) }),
+        WM_APP_UPDATE_CHECKED => on_update_checked(hwnd, unsafe { take_boxed(lp) }),
+        WM_APP_UPDATE_READY => on_update_ready(hwnd, unsafe { take_boxed(lp) }),
         WM_TIMER if wp.0 == FAIL_TIMER => check_failure(hwnd),
         WM_TIMER if wp.0 == HOLD_TIMER => check_hold(hwnd),
         WM_TIMER if wp.0 == COUNTDOWN_TIMER => countdown_done(hwnd),

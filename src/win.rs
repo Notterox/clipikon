@@ -13,6 +13,8 @@ pub const WM_APP_STARTED: u32 = WM_APP + 3;
 pub const WM_APP_STOPPED: u32 = WM_APP + 4;
 pub const WM_APP_STOP: u32 = WM_APP + 5;
 pub const WM_APP_QUICK_DONE: u32 = WM_APP + 6;
+pub const WM_APP_UPDATE_CHECKED: u32 = WM_APP + 7;
+pub const WM_APP_UPDATE_READY: u32 = WM_APP + 8;
 
 pub type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
 

@@ -17,8 +17,6 @@ pub struct Settings {
     pub audio_offset_ms: i32,
     pub open_editor_after_recording: bool,
     pub output_folder: PathBuf,
-    /// The tray tip about the hotkey has been shown (first start).
-    pub welcome_shown: bool,
 }
 
 impl Default for Settings {
@@ -36,7 +34,6 @@ impl Default for Settings {
             audio_offset_ms: 0,
             open_editor_after_recording: true,
             output_folder: videos.join("Clipikon"),
-            welcome_shown: false,
         }
     }
 }

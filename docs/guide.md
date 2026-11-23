@@ -32,7 +32,7 @@ sharing.
 |---|---|
 | `Alt+Shift+R` | Opens the picker. Step 1: drag an area (a click selects the whole screen), or switch the toolbar to **Window** (click a window) or **Display**. Step 2: drag the handles to resize, inside to move, outside to start over; set audio, cursor, frame rate and start delay on the toolbar (for this recording only); **Record** or Enter starts. Esc or right-click cancels. Press the hotkey again to stop recording. The microphone button is a placeholder for now. |
 | Hold `Alt+Shift+R` | After ~0.4 s a quick settings flyout opens: frame rate (up to the monitor's refresh rate), start delay (3/5/10 s), audio, cursor, and Record (Enter, or press the hotkey again). Choices there apply to that recording only and aren't saved. Esc or clicking away closes it. |
-| Tray icon | Left-click = record. Right-click = menu (open video, folder, capture options, settings). Options changed here are saved. |
+| Tray icon | Left-click = record. Right-click = menu (open video, folder, capture options, settings, launch at startup, check for updates). Options changed here are saved. |
 | Editor | Space play/pause · I/O set start/end · ←/→ frame step (Shift: 1 s) · C crop (Enter done, Esc cancel) · Ctrl+C copy frame |
 
 With a start delay, the frame and a countdown pill appear after you select the region; its Cancel button (or

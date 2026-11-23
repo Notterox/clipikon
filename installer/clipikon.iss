@@ -33,7 +33,8 @@ OutputDir=..\target\installer
 OutputBaseFilename=Clipikon-Setup-{#AppVersion}
 
 [Tasks]
-Name: startup; Description: "Launch Clipikon when Windows starts"
+; Asked on the first install only: an update keeps what the tray menu's "Launch at startup" says now.
+Name: startup; Description: "Launch Clipikon when Windows starts"; Check: not IsUpgrade
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
@@ -48,11 +49,37 @@ Name: "{autodesktop}\Clipikon"; Filename: "{app}\clipikon.exe"; Tasks: desktopic
 
 [Registry]
 ; The same value the tray menu's "Launch at startup" writes (src/autostart.rs).
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Clipikon"; ValueData: """{app}\clipikon.exe"""; Tasks: startup
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Clipikon"; Flags: deletevalue; Tasks: not startup
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Clipikon"; ValueData: """{app}\clipikon.exe"""; Tasks: startup; Check: not IsUpgrade
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Clipikon"; Flags: deletevalue; Tasks: not startup; Check: not IsUpgrade
 ; Removed on uninstall however it was set, along with Task Manager's record of it.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Clipikon"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: none; ValueName: "Clipikon"; Flags: uninsdeletevalue
 
 [Run]
-Filename: "{app}\clipikon.exe"; Description: "Start Clipikon"; Flags: nowait postinstall skipifsilent
+; On a first install Clipikon then shows how to record, once.
+Filename: "{app}\clipikon.exe"; Parameters: "{code:StartParams}"; Description: "Start Clipikon"; Flags: nowait postinstall skipifsilent
+; Clipikon's "Check for updates" runs setup with /SILENT: start it again afterwards.
+Filename: "{app}\clipikon.exe"; Flags: nowait; Check: WizardSilent
+
+[Code]
+var
+  Upgrade: Boolean;
+
+function InitializeSetup: Boolean;
+begin
+  Upgrade := RegValueExists(HKCU, ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1'), 'UninstallString');
+  Result := True;
+end;
+
+function IsUpgrade: Boolean;
+begin
+  Result := Upgrade;
+end;
+
+function StartParams(Param: String): String;
+begin
+  if Upgrade then
+    Result := ''
+  else
+    Result := '--installed';
+end;
