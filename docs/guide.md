@@ -18,7 +18,7 @@ sharing.
   - formats: MP4, MKV, WebM or GIF
   - fast lossless cut (MP4/MKV)
   - compress to a target size (10/25/50/100 MB, lowering the resolution automatically if needed)
-  - compress by quality, as H.264 or HEVC (NVENC) or AV1 (SVT-AV1 on the CPU: smallest files, slower;
+  - compress by quality (the default, Balanced), as H.264 or HEVC (NVENC) or AV1 (SVT-AV1 on the CPU: smallest files, slower;
     WebM is always AV1 + Opus)
   - GIF: frame rate, playback speed (0.5–2×), width, colors (32–256), dithering, loop, per-frame palette.
     **Preview GIF** renders it once and plays the real result with its exact size; Export then just saves it

@@ -235,7 +235,7 @@ impl Editor {
             cropping: None,
             format: Format::Mp4,
             video_format: Format::Mp4,
-            mode: Mode::TargetSize,
+            mode: Mode::Quality,
             codec: Codec::H264,
             quality: Quality::Balanced,
             size_text: "25".into(),
@@ -256,7 +256,7 @@ impl Editor {
     fn set_format(&mut self, f: Format) {
         self.format = f;
         if self.mode == Mode::FastCut && !f.allows_fast_cut() {
-            self.mode = Mode::TargetSize;
+            self.mode = Mode::Quality;
         }
         if let Some(&first) = f.codecs().first() {
             if !f.codecs().contains(&self.codec) {
@@ -581,7 +581,7 @@ impl Editor {
             self.crop = None;
         }
         if self.crop.is_some() && self.mode == Mode::FastCut {
-            self.mode = Mode::TargetSize;
+            self.mode = Mode::Quality;
         }
     }
 
